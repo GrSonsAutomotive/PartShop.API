@@ -5,11 +5,12 @@ namespace Site_2024.Models.Requests.RefundRequests
 {
     public class RefundRequestAddRequest
     {
-        [Required]
         [Range(1, int.MaxValue)]
-        public int PartId { get; set; }
+        public int? PartId { get; set; }
 
-        public long? ShopifyOrderId { get; set; }
+        [RegularExpression(@"^\d+$", ErrorMessage = "Shopify Order Id must contain numbers only.")]
+        [StringLength(19)]
+        public string? ShopifyOrderId { get; set; }
 
         [StringLength(100)]
         public string? OrderNumber { get; set; }
@@ -17,6 +18,12 @@ namespace Site_2024.Models.Requests.RefundRequests
         [EmailAddress]
         [StringLength(256)]
         public string? CustomerEmail { get; set; }
+
+        [StringLength(500)]
+        public string? RequestedPartName { get; set; }
+
+        [Range(1, 999)]
+        public int? RequestedQuantity { get; set; }
 
         [Range(1, int.MaxValue)]
         public int? ReturnReasonId { get; set; }
@@ -28,8 +35,11 @@ namespace Site_2024.Models.Requests.RefundRequests
         [StringLength(4000)]
         public string? Notes { get; set; }
 
-        public List<RefundRequestItemAddRequest> Items { get; set; } = new List<RefundRequestItemAddRequest>();
-        public List<RefundRequestPhotoAddRequest> Photos { get; set; } = new List<RefundRequestPhotoAddRequest>();
+        public List<RefundRequestItemAddRequest> Items { get; set; } =
+            new List<RefundRequestItemAddRequest>();
+
+        public List<RefundRequestPhotoAddRequest> Photos { get; set; } =
+            new List<RefundRequestPhotoAddRequest>();
     }
 
     public class RefundRequestItemAddRequest

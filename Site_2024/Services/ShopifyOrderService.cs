@@ -2,9 +2,11 @@ using Microsoft.Extensions.Options;
 using Site_2024.Web.Api.Configurations;
 using Site_2024.Web.Api.Extensions;
 using Site_2024.Web.Api.Interfaces;
+using Site_2024.Models.Domain.RefundRequests;
 using Site_2024.Web.Api.Models;
 using System.Data;
 using System.Data.SqlClient;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using StaticFileOptions = Site_2024.Web.Api.Configurations.StaticFileOptions;
@@ -124,6 +126,477 @@ query GetRecentOrders($first: Int!, $query: String) {
             return orders;
         }
 
+
+        public async Task<ShopifyReturnOrderLookupResult?>
+            GetOrderForReturnAsync(
+                string orderNumber,
+                string? expectedEmail)
+        {
+            string normalizedOrderName =
+                NormalizeOrderName(orderNumber);
+
+            if (string.IsNullOrWhiteSpace(normalizedOrderName))
+            {
+                throw new InvalidOperationException(
+                    "Order number is required.");
+            }
+
+            string query = @"
+query GetReturnOrder($query: String!) {
+  orders(
+    first: 10,
+    reverse: true,
+    sortKey: PROCESSED_AT,
+    query: $query
+  ) {
+    nodes {
+      id
+      name
+      createdAt
+      email
+      displayFinancialStatus
+      displayFulfillmentStatus
+      shippingAddress {
+        countryCodeV2
+      }
+      fulfillments(first: 20) {
+        deliveredAt
+      }
+      customer {
+        displayName
+        email
+      }
+      currentTotalPriceSet {
+        shopMoney {
+          amount
+          currencyCode
+        }
+      }
+      lineItems(first: 100) {
+        nodes {
+          id
+          title
+          quantity
+          sku
+          originalUnitPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          variant {
+            id
+            sku
+            image {
+              url
+            }
+            product {
+              id
+            }
+          }
+        }
+      }
+    }
+  }
+}";
+
+            string searchQuery =
+                $"name:{QuoteSearchValue(normalizedOrderName)}";
+
+            using JsonDocument doc =
+                await SendGraphQlAsync(
+                    query,
+                    new
+                    {
+                        query = searchQuery
+                    });
+
+            ThrowIfTopLevelErrors(doc);
+
+            JsonElement nodes = doc.RootElement
+                .GetProperty("data")
+                .GetProperty("orders")
+                .GetProperty("nodes");
+
+            ShopifyOrderSummary? matchedOrder = null;
+
+            foreach (JsonElement node in nodes.EnumerateArray())
+            {
+                ShopifyOrderSummary candidate =
+                    MapOrder(node);
+
+                if (!string.Equals(
+                        NormalizeOrderName(candidate.Name),
+                        normalizedOrderName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                foreach (
+                    ShopifyOrderLineItemSummary item
+                    in candidate.LineItems)
+                {
+                    if (item.ShopifyVariantId.HasValue)
+                    {
+                        item.LocalPart =
+                            GetLocalPartMatchByVariantId(
+                                item.ShopifyVariantId.Value);
+                    }
+                }
+
+                matchedOrder = candidate;
+                break;
+            }
+
+            if (matchedOrder == null)
+            {
+                return null;
+            }
+
+            string requestedEmail =
+                (expectedEmail ?? string.Empty).Trim();
+
+            bool emailMatches =
+                !string.IsNullOrWhiteSpace(requestedEmail)
+                &&
+                !string.IsNullOrWhiteSpace(
+                    matchedOrder.CustomerEmail)
+                &&
+                string.Equals(
+                    requestedEmail,
+                    matchedOrder.CustomerEmail.Trim(),
+                    StringComparison.OrdinalIgnoreCase);
+
+            return new ShopifyReturnOrderLookupResult
+            {
+                Order = matchedOrder,
+                RequestedEmail =
+                    string.IsNullOrWhiteSpace(requestedEmail)
+                        ? null
+                        : requestedEmail,
+                CustomerEmailMatches = emailMatches
+            };
+        }
+
+        public async Task<ShopifyRefundPreviewResult> GetRefundPreviewAsync(
+            RefundRequest refundRequest,
+            ShopifyRefundPreviewOptions options)
+        {
+            if (refundRequest == null)
+            {
+                throw new ArgumentNullException(nameof(refundRequest));
+            }
+
+            options ??= new ShopifyRefundPreviewOptions();
+
+            ValidateRefundPreviewRequest(refundRequest, options);
+
+            long shopifyOrderId = refundRequest.ShopifyOrderId!.Value;
+            string orderGid = BuildShopifyGid("Order", shopifyOrderId);
+
+            List<RefundRequestItem> inspectedItems = refundRequest.Items
+                .Where(item => (item.QuantityReceived ?? 0) > 0)
+                .ToList();
+
+            ShopifyRefundableOrderState orderState =
+                await LoadRefundableOrderStateAsync(orderGid);
+
+            if (!orderState.Exists)
+            {
+                throw new InvalidOperationException(
+                    $"Shopify order {shopifyOrderId} was not found.");
+            }
+
+            if (!orderState.Refundable)
+            {
+                throw new InvalidOperationException(
+                    "Shopify reports that this order is not refundable.");
+            }
+
+            Dictionary<long, RefundRequestItem> localItemsByLineId =
+                inspectedItems.ToDictionary(
+                    item => item.ShopifyLineItemId!.Value,
+                    item => item);
+
+            List<object> refundLineItems = new List<object>();
+
+            foreach (RefundRequestItem item in inspectedItems)
+            {
+                long lineItemId = item.ShopifyLineItemId!.Value;
+
+                if (!orderState.LineItems.TryGetValue(
+                        lineItemId,
+                        out ShopifyRefundableLineState? shopifyLine))
+                {
+                    throw new InvalidOperationException(
+                        $"Refund request item {item.Id} is linked to Shopify line item {lineItemId}, but that line item is not present on order {orderState.Name}.");
+                }
+
+                int quantityReceived = item.QuantityReceived ?? 0;
+
+                if (quantityReceived > shopifyLine.RefundableQuantity)
+                {
+                    throw new InvalidOperationException(
+                        $"{shopifyLine.Title} has only {shopifyLine.RefundableQuantity} unit(s) remaining refundable in Shopify, but the completed inspection received {quantityReceived}.");
+                }
+
+                refundLineItems.Add(new
+                {
+                    lineItemId = shopifyLine.Gid,
+                    quantity = quantityReceived,
+                    restockType = "NO_RESTOCK"
+                });
+            }
+
+            using JsonDocument previewDocument =
+                await LoadSuggestedRefundAsync(
+                    orderGid,
+                    refundLineItems);
+
+            ThrowIfTopLevelErrors(previewDocument);
+
+            JsonElement orderNode = previewDocument.RootElement
+                .GetProperty("data")
+                .GetProperty("order");
+
+            if (orderNode.ValueKind == JsonValueKind.Null)
+            {
+                throw new InvalidOperationException(
+                    $"Shopify order {shopifyOrderId} was not found while calculating the refund preview.");
+            }
+
+            JsonElement itemsOnly = GetRequiredObject(
+                orderNode,
+                "itemsOnly",
+                "Shopify did not return an item refund suggestion.");
+
+            JsonElement itemsAndShipping = GetRequiredObject(
+                orderNode,
+                "itemsAndShipping",
+                "Shopify did not return a shipping refund suggestion.");
+
+            string currencyCode =
+                GetMoneyCurrencyCode(
+                    itemsOnly,
+                    "amountSet",
+                    preferPresentment: true)
+                ?? orderState.PresentmentCurrencyCode
+                ?? orderState.ShopCurrencyCode
+                ?? string.Empty;
+
+            decimal subtotalBeforeDiscount =
+                GetMoneyAmount(
+                    itemsOnly,
+                    "subtotalSet",
+                    preferPresentment: true);
+
+            decimal merchandiseRefund =
+                GetMoneyAmount(
+                    itemsOnly,
+                    "discountedSubtotalSet",
+                    preferPresentment: true);
+
+            decimal cartDiscount =
+                GetMoneyAmount(
+                    itemsOnly,
+                    "totalCartDiscountAmountSet",
+                    preferPresentment: true);
+
+            decimal taxRefund =
+                GetMoneyAmount(
+                    itemsOnly,
+                    "totalTaxSet",
+                    preferPresentment: true);
+
+            decimal dutiesRefund =
+                GetMoneyAmount(
+                    itemsOnly,
+                    "totalDutiesSet",
+                    preferPresentment: true);
+
+            decimal suggestedItemRefund =
+                GetMoneyAmount(
+                    itemsOnly,
+                    "amountSet",
+                    preferPresentment: true);
+
+            if (dutiesRefund > 0.01m)
+            {
+                throw new InvalidOperationException(
+                    "Shopify returned refundable duties. Duties are not included in the approved Site_2024 final-refund calculation and require manual review.");
+            }
+
+            decimal itemBreakdownTotal =
+                merchandiseRefund + taxRefund;
+
+            if (Math.Abs(itemBreakdownTotal - suggestedItemRefund) > 0.01m)
+            {
+                throw new InvalidOperationException(
+                    "Shopify's item refund total does not match its merchandise, tax, and duty breakdown. Manual reconciliation is required before preparing this refund.");
+            }
+
+            JsonElement shipping = GetRequiredObject(
+                itemsAndShipping,
+                "shipping",
+                "Shopify did not return a shipping refund breakdown.");
+
+            decimal shippingBaseRefundable =
+                GetMoneyAmount(
+                    shipping,
+                    "amountSet",
+                    preferPresentment: true);
+
+            decimal shippingTaxRefundable =
+                GetMoneyAmount(
+                    shipping,
+                    "taxSet",
+                    preferPresentment: true);
+
+            decimal itemsAndShippingAmount =
+                GetMoneyAmount(
+                    itemsAndShipping,
+                    "amountSet",
+                    preferPresentment: true);
+
+            decimal shippingRefundable = Math.Max(
+                0m,
+                itemsAndShippingAmount - suggestedItemRefund);
+
+            decimal shippingBreakdownTotal =
+                shippingBaseRefundable + shippingTaxRefundable;
+
+            if (Math.Abs(shippingBreakdownTotal - shippingRefundable) > 0.01m)
+            {
+                throw new InvalidOperationException(
+                    "Shopify's shipping refund total does not match its shipping and shipping-tax breakdown. Manual reconciliation is required before preparing this refund.");
+            }
+
+            bool originalShippingAllowed =
+                refundRequest.SellerError == true;
+
+            decimal originalShippingRefund =
+                options.IncludeOriginalShippingRefund
+                && originalShippingAllowed
+                    ? shippingRefundable
+                    : 0m;
+
+            decimal buyerPaidLabelDeduction =
+                string.Equals(
+                    refundRequest.ReturnShippingPayer,
+                    "Buyer",
+                    StringComparison.OrdinalIgnoreCase)
+                && refundRequest.ReturnLabelCost.GetValueOrDefault() > 0m
+                    ? MoneyRound(
+                        refundRequest.ReturnLabelCost.GetValueOrDefault())
+                    : 0m;
+
+            decimal additionalDeduction =
+                MoneyRound(options.AdditionalDeductionAmount);
+
+            decimal maximumRefundable =
+                GetMoneyAmount(
+                    itemsAndShipping,
+                    "maximumRefundableSet",
+                    preferPresentment: true);
+
+            decimal finalRefund = MoneyRound(
+                merchandiseRefund
+                + taxRefund
+                + originalShippingRefund
+                - buyerPaidLabelDeduction
+                - additionalDeduction);
+
+            if (finalRefund < 0m)
+            {
+                throw new InvalidOperationException(
+                    $"The final refund cannot be below 0.00 {currencyCode}. Reduce the deductions before preparing the refund.");
+            }
+
+            if (finalRefund > maximumRefundable)
+            {
+                throw new InvalidOperationException(
+                    $"The calculated refund of {finalRefund:0.00} {currencyCode} exceeds Shopify's remaining refundable amount of {maximumRefundable:0.00} {currencyCode}.");
+            }
+
+            ShopifyRefundPreviewResult result =
+                new ShopifyRefundPreviewResult
+                {
+                    RefundRequestId = refundRequest.Id,
+                    ShopifyOrderId = shopifyOrderId,
+                    ShopifyOrderGid = orderState.Gid,
+                    OrderName = orderState.Name,
+                    OrderIsRefundable = orderState.Refundable,
+                    CurrencyCode = currencyCode,
+                    ShopCurrencyCode =
+                        orderState.ShopCurrencyCode
+                        ?? currencyCode,
+                    SellerError = refundRequest.SellerError == true,
+                    IsInternational =
+                        refundRequest.IsInternational == true,
+                    ReturnShippingPayer =
+                        refundRequest.ReturnShippingPayer,
+                    OriginalShippingRequested =
+                        options.IncludeOriginalShippingRefund,
+                    OriginalShippingAllowed =
+                        originalShippingAllowed,
+                    MerchandiseSubtotalBeforeDiscountAmount =
+                        MoneyRound(subtotalBeforeDiscount),
+                    MerchandiseDiscountAmount = MoneyRound(
+                        Math.Max(
+                            0m,
+                            subtotalBeforeDiscount
+                            - merchandiseRefund)),
+                    CartDiscountAmount = MoneyRound(cartDiscount),
+                    MerchandiseRefundAmount =
+                        MoneyRound(merchandiseRefund),
+                    TaxRefundAmount = MoneyRound(taxRefund),
+                    ShopifySuggestedItemRefundAmount =
+                        MoneyRound(suggestedItemRefund),
+                    ShopifyShippingBaseRefundableAmount =
+                        MoneyRound(shippingBaseRefundable),
+                    ShopifyShippingTaxRefundableAmount =
+                        MoneyRound(shippingTaxRefundable),
+                    ShopifyShippingRefundableAmount =
+                        MoneyRound(shippingRefundable),
+                    OriginalShippingRefundAmount =
+                        MoneyRound(originalShippingRefund),
+                    BuyerPaidLabelDeductionAmount =
+                        buyerPaidLabelDeduction,
+                    AdditionalDeductionAmount =
+                        additionalDeduction,
+                    AdditionalDeductionReason =
+                        string.IsNullOrWhiteSpace(
+                            options.AdditionalDeductionReason)
+                            ? null
+                            : options.AdditionalDeductionReason.Trim(),
+                    ShopifyMaximumRefundableAmount =
+                        MoneyRound(maximumRefundable),
+                    FinalRefundAmount = finalRefund,
+                    PreviewedAtUtc = DateTime.UtcNow,
+                    ShopifyPreviewJson =
+                        previewDocument.RootElement.GetRawText()
+                };
+
+            MapRefundPreviewLineItems(
+                result,
+                itemsOnly,
+                localItemsByLineId,
+                orderState);
+
+            JsonElement selectedSuggestion =
+                options.IncludeOriginalShippingRefund
+                && originalShippingAllowed
+                    ? itemsAndShipping
+                    : itemsOnly;
+
+            MapSuggestedTransactions(
+                result,
+                selectedSuggestion);
+
+            return result;
+        }
+
         public async Task<ShopifyOrderSyncResult> SyncRecentPaidOrdersAsync(int first, int userId)
         {
             ShopifyOrderSyncResult result = new ShopifyOrderSyncResult();
@@ -225,6 +698,837 @@ query GetRecentOrders($first: Int!, $query: String) {
             return result;
         }
 
+
+        private static void ValidateRefundPreviewRequest(
+            RefundRequest refundRequest,
+            ShopifyRefundPreviewOptions options)
+        {
+            if (!refundRequest.ShopifyOrderId.HasValue
+                || refundRequest.ShopifyOrderId.Value <= 0)
+            {
+                throw new InvalidOperationException(
+                    "The refund request is not linked to a Shopify order.");
+            }
+
+            if (!string.Equals(
+                    refundRequest.InspectionStatus,
+                    "Completed",
+                    StringComparison.OrdinalIgnoreCase)
+                || !refundRequest.InspectionCompletedAt.HasValue
+                || !refundRequest.ReadyForRefundAt.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "The item-receipt inspection must be completed before loading a final refund preview.");
+            }
+
+            if (!refundRequest.SellerError.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "The return decision must specify whether seller error occurred before loading a final refund preview.");
+            }
+
+            if (options.AdditionalDeductionAmount < 0m)
+            {
+                throw new InvalidOperationException(
+                    "The additional deduction cannot be negative.");
+            }
+
+            if (options.AdditionalDeductionAmount > 0m
+                && string.IsNullOrWhiteSpace(
+                    options.AdditionalDeductionReason))
+            {
+                throw new InvalidOperationException(
+                    "An additional deduction requires a written reason.");
+            }
+
+            if (options.IncludeOriginalShippingRefund
+                && refundRequest.SellerError != true)
+            {
+                throw new InvalidOperationException(
+                    "Original outbound shipping can only be refunded when seller error is marked Yes.");
+            }
+
+            List<RefundRequestItem> inspectedItems = refundRequest.Items
+                .Where(item => (item.QuantityReceived ?? 0) > 0)
+                .ToList();
+
+            if (inspectedItems.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "No inspected, received quantities are available to refund.");
+            }
+
+            List<long> duplicateLineItemIds = inspectedItems
+                .Where(item => item.ShopifyLineItemId.HasValue)
+                .GroupBy(item => item.ShopifyLineItemId!.Value)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key)
+                .ToList();
+
+            if (duplicateLineItemIds.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "The refund request contains duplicate Shopify line-item matches. Correct the matching before preparing the refund.");
+            }
+
+            foreach (RefundRequestItem item in inspectedItems)
+            {
+                if (!item.ShopifyLineItemId.HasValue
+                    || item.ShopifyLineItemId.Value <= 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Refund request item {item.Id} has received quantity but is not matched to a Shopify line item.");
+                }
+
+                if (!item.InspectionCompletedAt.HasValue)
+                {
+                    throw new InvalidOperationException(
+                        $"Refund request item {item.Id} does not have a completed inspection.");
+                }
+
+                int quantityReceived = item.QuantityReceived ?? 0;
+                int restockQuantity = item.RestockQuantity ?? 0;
+                int holdQuantity = item.HoldQuantity ?? 0;
+                int damagedQuantity = item.DamagedQuantity ?? 0;
+
+                if (restockQuantity < 0
+                    || holdQuantity < 0
+                    || damagedQuantity < 0
+                    || restockQuantity
+                        + holdQuantity
+                        + damagedQuantity
+                        != quantityReceived)
+                {
+                    throw new InvalidOperationException(
+                        $"Refund request item {item.Id} has an invalid inspection allocation. Restock, hold, and damaged quantities must equal the quantity received.");
+                }
+
+                if (item.QuantityPurchased.HasValue
+                    && quantityReceived
+                        > item.QuantityPurchased.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"Refund request item {item.Id} received quantity exceeds the quantity purchased.");
+                }
+            }
+        }
+
+        private async Task<ShopifyRefundableOrderState>
+            LoadRefundableOrderStateAsync(string orderGid)
+        {
+            string query = @"
+query GetRefundableOrder($orderId: ID!) {
+  order(id: $orderId) {
+    id
+    name
+    refundable
+    currencyCode
+    presentmentCurrencyCode
+    lineItems(first: 100) {
+      nodes {
+        id
+        title
+        sku
+        quantity
+        refundableQuantity
+        restockable
+      }
+    }
+  }
+}";
+
+            using JsonDocument document =
+                await SendGraphQlAsync(
+                    query,
+                    new
+                    {
+                        orderId = orderGid
+                    });
+
+            ThrowIfTopLevelErrors(document);
+
+            JsonElement orderNode = document.RootElement
+                .GetProperty("data")
+                .GetProperty("order");
+
+            if (orderNode.ValueKind == JsonValueKind.Null)
+            {
+                return new ShopifyRefundableOrderState
+                {
+                    Exists = false
+                };
+            }
+
+            ShopifyRefundableOrderState state =
+                new ShopifyRefundableOrderState
+                {
+                    Exists = true,
+                    Gid = GetString(orderNode, "id")
+                        ?? orderGid,
+                    Name = GetString(orderNode, "name")
+                        ?? string.Empty,
+                    Refundable = GetBoolean(
+                        orderNode,
+                        "refundable"),
+                    ShopCurrencyCode = GetString(
+                        orderNode,
+                        "currencyCode"),
+                    PresentmentCurrencyCode = GetString(
+                        orderNode,
+                        "presentmentCurrencyCode")
+                };
+
+            if (orderNode.TryGetProperty(
+                    "lineItems",
+                    out JsonElement lineItems)
+                && lineItems.TryGetProperty(
+                    "nodes",
+                    out JsonElement nodes))
+            {
+                foreach (JsonElement node in nodes.EnumerateArray())
+                {
+                    string gid = GetString(node, "id")
+                        ?? string.Empty;
+                    long numericId = ExtractNumericId(gid);
+
+                    if (numericId <= 0)
+                    {
+                        continue;
+                    }
+
+                    state.LineItems[numericId] =
+                        new ShopifyRefundableLineState
+                        {
+                            Gid = gid,
+                            NumericId = numericId,
+                            Title = GetString(node, "title")
+                                ?? string.Empty,
+                            Sku = GetString(node, "sku"),
+                            Quantity = GetInt32(
+                                node,
+                                "quantity"),
+                            RefundableQuantity = GetInt32(
+                                node,
+                                "refundableQuantity"),
+                            Restockable = GetBoolean(
+                                node,
+                                "restockable")
+                        };
+                }
+            }
+
+            return state;
+        }
+
+        private async Task<JsonDocument> LoadSuggestedRefundAsync(
+            string orderGid,
+            List<object> refundLineItems)
+        {
+            string query = @"
+query GetSuggestedRefund(
+  $orderId: ID!,
+  $refundLineItems: [RefundLineItemInput!]!
+) {
+  order(id: $orderId) {
+    id
+    name
+    refundable
+    currencyCode
+    presentmentCurrencyCode
+
+    itemsOnly: suggestedRefund(
+      refundLineItems: $refundLineItems,
+      refundShipping: false
+    ) {
+      amountSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      subtotalSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      discountedSubtotalSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      totalCartDiscountAmountSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      totalTaxSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      totalDutiesSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      maximumRefundableSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      refundLineItems {
+        quantity
+        subtotalSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        totalTaxSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        lineItem {
+          id
+          title
+          sku
+          quantity
+          refundableQuantity
+        }
+      }
+      shipping {
+        amountSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        maximumRefundableSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        taxSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+      }
+      suggestedTransactions {
+        kind
+        gateway
+        formattedGateway
+        accountNumber
+        amountSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        maximumRefundableSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        parentTransaction {
+          id
+          status
+          kind
+          gateway
+        }
+      }
+    }
+
+    itemsAndShipping: suggestedRefund(
+      refundLineItems: $refundLineItems,
+      refundShipping: true
+    ) {
+      amountSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      subtotalSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      discountedSubtotalSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      totalCartDiscountAmountSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      totalTaxSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      totalDutiesSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      maximumRefundableSet {
+        shopMoney { amount currencyCode }
+        presentmentMoney { amount currencyCode }
+      }
+      refundLineItems {
+        quantity
+        subtotalSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        totalTaxSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        lineItem {
+          id
+          title
+          sku
+          quantity
+          refundableQuantity
+        }
+      }
+      shipping {
+        amountSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        maximumRefundableSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        taxSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+      }
+      suggestedTransactions {
+        kind
+        gateway
+        formattedGateway
+        accountNumber
+        amountSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        maximumRefundableSet {
+          shopMoney { amount currencyCode }
+          presentmentMoney { amount currencyCode }
+        }
+        parentTransaction {
+          id
+          status
+          kind
+          gateway
+        }
+      }
+    }
+  }
+}";
+
+            return await SendGraphQlAsync(
+                query,
+                new
+                {
+                    orderId = orderGid,
+                    refundLineItems
+                });
+        }
+
+        private static void MapRefundPreviewLineItems(
+            ShopifyRefundPreviewResult result,
+            JsonElement suggestedRefund,
+            Dictionary<long, RefundRequestItem> localItemsByLineId,
+            ShopifyRefundableOrderState orderState)
+        {
+            if (!suggestedRefund.TryGetProperty(
+                    "refundLineItems",
+                    out JsonElement refundLineItems)
+                || refundLineItems.ValueKind
+                    != JsonValueKind.Array)
+            {
+                throw new InvalidOperationException(
+                    "Shopify did not return the suggested refund line items.");
+            }
+
+            HashSet<long> mappedLineItemIds = new HashSet<long>();
+
+            foreach (JsonElement refundLineItem
+                in refundLineItems.EnumerateArray())
+            {
+                JsonElement lineItem = GetRequiredObject(
+                    refundLineItem,
+                    "lineItem",
+                    "Shopify returned a refund line without its source line item.");
+
+                string lineItemGid =
+                    GetString(lineItem, "id")
+                    ?? string.Empty;
+
+                long lineItemId = ExtractNumericId(lineItemGid);
+
+                if (!localItemsByLineId.TryGetValue(
+                        lineItemId,
+                        out RefundRequestItem? localItem))
+                {
+                    throw new InvalidOperationException(
+                        $"Shopify returned unexpected refund line item {lineItemId}.");
+                }
+
+                if (!orderState.LineItems.TryGetValue(
+                        lineItemId,
+                        out ShopifyRefundableLineState? orderLine))
+                {
+                    throw new InvalidOperationException(
+                        $"Shopify line item {lineItemId} could not be reconciled with the order snapshot.");
+                }
+
+                int quantityToRefund =
+                    GetInt32(refundLineItem, "quantity");
+
+                int expectedQuantity =
+                    localItem.QuantityReceived ?? 0;
+
+                if (quantityToRefund != expectedQuantity)
+                {
+                    throw new InvalidOperationException(
+                        $"Shopify suggested quantity {quantityToRefund} for {orderLine.Title}, but the completed inspection received {expectedQuantity}.");
+                }
+
+                decimal subtotal = GetMoneyAmount(
+                    refundLineItem,
+                    "subtotalSet",
+                    preferPresentment: true);
+
+                decimal tax = GetMoneyAmount(
+                    refundLineItem,
+                    "totalTaxSet",
+                    preferPresentment: true);
+
+                result.Items.Add(
+                    new ShopifyRefundPreviewLineItem
+                    {
+                        RefundRequestItemId = localItem.Id,
+                        PartId = localItem.PartId,
+                        PartName =
+                            localItem.PartName
+                            ?? localItem.ProductTitle,
+                        PartNumber =
+                            localItem.PartNumber
+                            ?? localItem.Sku,
+                        ShopifyLineItemId = lineItemId,
+                        ShopifyLineItemGid = lineItemGid,
+                        ShopifyTitle =
+                            GetString(lineItem, "title")
+                            ?? orderLine.Title,
+                        ShopifySku =
+                            GetString(lineItem, "sku")
+                            ?? orderLine.Sku,
+                        QuantityPurchased =
+                            orderLine.Quantity,
+                        ShopifyRefundableQuantity =
+                            orderLine.RefundableQuantity,
+                        QuantityReceived = expectedQuantity,
+                        QuantityToRefund = quantityToRefund,
+                        RestockQuantity =
+                            localItem.RestockQuantity ?? 0,
+                        HoldQuantity =
+                            localItem.HoldQuantity ?? 0,
+                        DamagedQuantity =
+                            localItem.DamagedQuantity ?? 0,
+                        ShopifySubtotalAmount =
+                            MoneyRound(subtotal),
+                        ShopifyTaxAmount =
+                            MoneyRound(tax),
+                        ShopifyTotalAmount =
+                            MoneyRound(subtotal + tax),
+                        CurrencyCode = result.CurrencyCode
+                    });
+
+                mappedLineItemIds.Add(lineItemId);
+            }
+
+            if (mappedLineItemIds.Count
+                != localItemsByLineId.Count)
+            {
+                throw new InvalidOperationException(
+                    "Shopify did not return every inspected line item in the refund suggestion.");
+            }
+        }
+
+        private static void MapSuggestedTransactions(
+            ShopifyRefundPreviewResult result,
+            JsonElement suggestedRefund)
+        {
+            if (!suggestedRefund.TryGetProperty(
+                    "suggestedTransactions",
+                    out JsonElement transactions)
+                || transactions.ValueKind
+                    != JsonValueKind.Array)
+            {
+                return;
+            }
+
+            foreach (JsonElement transaction
+                in transactions.EnumerateArray())
+            {
+                decimal? maximumRefundable =
+                    TryGetMoneyAmount(
+                        transaction,
+                        "maximumRefundableSet",
+                        preferPresentment: true);
+
+                string? parentGid = null;
+                long? parentId = null;
+                string? parentStatus = null;
+                string? parentKind = null;
+                string? parentGateway = null;
+
+                if (transaction.TryGetProperty(
+                        "parentTransaction",
+                        out JsonElement parent)
+                    && parent.ValueKind
+                        == JsonValueKind.Object)
+                {
+                    parentGid = GetString(parent, "id");
+                    long parsedParentId =
+                        ExtractNumericId(parentGid);
+                    parentId = parsedParentId > 0
+                        ? parsedParentId
+                        : null;
+                    parentStatus = GetString(parent, "status");
+                    parentKind = GetString(parent, "kind");
+                    parentGateway = GetString(parent, "gateway");
+                }
+
+                result.SuggestedTransactions.Add(
+                    new ShopifyRefundSuggestedTransaction
+                    {
+                        Kind = GetString(transaction, "kind")
+                            ?? string.Empty,
+                        Gateway = GetString(
+                            transaction,
+                            "gateway"),
+                        FormattedGateway = GetString(
+                            transaction,
+                            "formattedGateway"),
+                        AccountNumber = GetString(
+                            transaction,
+                            "accountNumber"),
+                        Amount = MoneyRound(
+                            GetMoneyAmount(
+                                transaction,
+                                "amountSet",
+                                preferPresentment: true)),
+                        MaximumRefundableAmount =
+                            maximumRefundable.HasValue
+                                ? MoneyRound(
+                                    maximumRefundable.Value)
+                                : null,
+                        CurrencyCode =
+                            GetMoneyCurrencyCode(
+                                transaction,
+                                "amountSet",
+                                preferPresentment: true)
+                            ?? result.CurrencyCode,
+                        ParentTransactionId = parentId,
+                        ParentTransactionGid = parentGid,
+                        ParentTransactionStatus = parentStatus,
+                        ParentTransactionKind = parentKind,
+                        ParentTransactionGateway = parentGateway
+                    });
+            }
+        }
+
+        private static JsonElement GetRequiredObject(
+            JsonElement parent,
+            string propertyName,
+            string errorMessage)
+        {
+            if (!parent.TryGetProperty(
+                    propertyName,
+                    out JsonElement value)
+                || value.ValueKind
+                    != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException(errorMessage);
+            }
+
+            return value;
+        }
+
+        private static decimal GetMoneyAmount(
+            JsonElement parent,
+            string propertyName,
+            bool preferPresentment)
+        {
+            decimal? value = TryGetMoneyAmount(
+                parent,
+                propertyName,
+                preferPresentment);
+
+            return value ?? 0m;
+        }
+
+        private static decimal? TryGetMoneyAmount(
+            JsonElement parent,
+            string propertyName,
+            bool preferPresentment)
+        {
+            if (!parent.TryGetProperty(
+                    propertyName,
+                    out JsonElement moneyBag)
+                || moneyBag.ValueKind
+                    != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            string firstProperty = preferPresentment
+                ? "presentmentMoney"
+                : "shopMoney";
+
+            string secondProperty = preferPresentment
+                ? "shopMoney"
+                : "presentmentMoney";
+
+            JsonElement money;
+
+            if (!moneyBag.TryGetProperty(
+                    firstProperty,
+                    out money)
+                || money.ValueKind
+                    != JsonValueKind.Object)
+            {
+                if (!moneyBag.TryGetProperty(
+                        secondProperty,
+                        out money)
+                    || money.ValueKind
+                        != JsonValueKind.Object)
+                {
+                    return null;
+                }
+            }
+
+            string? rawAmount = GetString(money, "amount");
+
+            return decimal.TryParse(
+                rawAmount,
+                NumberStyles.Number,
+                CultureInfo.InvariantCulture,
+                out decimal amount)
+                    ? amount
+                    : null;
+        }
+
+        private static string? GetMoneyCurrencyCode(
+            JsonElement parent,
+            string propertyName,
+            bool preferPresentment)
+        {
+            if (!parent.TryGetProperty(
+                    propertyName,
+                    out JsonElement moneyBag)
+                || moneyBag.ValueKind
+                    != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            string firstProperty = preferPresentment
+                ? "presentmentMoney"
+                : "shopMoney";
+
+            string secondProperty = preferPresentment
+                ? "shopMoney"
+                : "presentmentMoney";
+
+            if (moneyBag.TryGetProperty(
+                    firstProperty,
+                    out JsonElement first)
+                && first.ValueKind
+                    == JsonValueKind.Object)
+            {
+                string? currency =
+                    GetString(first, "currencyCode");
+
+                if (!string.IsNullOrWhiteSpace(currency))
+                {
+                    return currency;
+                }
+            }
+
+            if (moneyBag.TryGetProperty(
+                    secondProperty,
+                    out JsonElement second)
+                && second.ValueKind
+                    == JsonValueKind.Object)
+            {
+                return GetString(second, "currencyCode");
+            }
+
+            return null;
+        }
+
+        private static bool GetBoolean(
+            JsonElement element,
+            string propertyName)
+        {
+            return element.TryGetProperty(
+                    propertyName,
+                    out JsonElement value)
+                && value.ValueKind
+                    == JsonValueKind.True;
+        }
+
+        private static decimal MoneyRound(decimal amount)
+        {
+            return decimal.Round(
+                amount,
+                2,
+                MidpointRounding.AwayFromZero);
+        }
+
+        private static string BuildShopifyGid(
+            string resourceType,
+            long numericId)
+        {
+            return $"gid://shopify/{resourceType}/{numericId}";
+        }
+
+        private sealed class ShopifyRefundableOrderState
+        {
+            public bool Exists { get; set; }
+            public string Gid { get; set; } = string.Empty;
+            public string Name { get; set; } = string.Empty;
+            public bool Refundable { get; set; }
+            public string? ShopCurrencyCode { get; set; }
+            public string? PresentmentCurrencyCode { get; set; }
+
+            public Dictionary<long, ShopifyRefundableLineState>
+                LineItems { get; set; } =
+                    new Dictionary<long, ShopifyRefundableLineState>();
+        }
+
+        private sealed class ShopifyRefundableLineState
+        {
+            public string Gid { get; set; } = string.Empty;
+            public long NumericId { get; set; }
+            public string Title { get; set; } = string.Empty;
+            public string? Sku { get; set; }
+            public int Quantity { get; set; }
+            public int RefundableQuantity { get; set; }
+            public bool Restockable { get; set; }
+        }
+
+        private static string NormalizeOrderName(
+            string? orderNumber)
+        {
+            string value =
+                (orderNumber ?? string.Empty).Trim();
+
+            while (value.StartsWith("#"))
+            {
+                value = value.Substring(1).TrimStart();
+            }
+
+            return value;
+        }
+
+        private static string QuoteSearchValue(
+            string value)
+        {
+            string escaped = value
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"");
+
+            return $"\"{escaped}\"";
+        }
+
         private static bool IsPaidFinancialStatus(string? status)
         {
             if (string.IsNullOrWhiteSpace(status))
@@ -291,6 +1595,41 @@ query GetRecentOrders($first: Int!, $query: String) {
             {
                 order.TotalPrice = GetDecimal(shopMoney, "amount");
                 order.CurrencyCode = GetString(shopMoney, "currencyCode");
+            }
+
+            if (node.TryGetProperty("shippingAddress", out JsonElement shippingAddress)
+                && shippingAddress.ValueKind != JsonValueKind.Null)
+            {
+                order.DestinationCountryCode =
+                    GetString(shippingAddress, "countryCodeV2");
+
+                order.IsInternational =
+                    !string.IsNullOrWhiteSpace(order.DestinationCountryCode)
+                    && !string.Equals(
+                        order.DestinationCountryCode,
+                        "US",
+                        StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (node.TryGetProperty("fulfillments", out JsonElement fulfillments)
+                && fulfillments.ValueKind == JsonValueKind.Array)
+            {
+                DateTime? latestDeliveredAt = null;
+
+                foreach (JsonElement fulfillment in fulfillments.EnumerateArray())
+                {
+                    DateTime? deliveredAt =
+                        GetDateTimeNullable(fulfillment, "deliveredAt");
+
+                    if (deliveredAt.HasValue
+                        && (!latestDeliveredAt.HasValue
+                            || deliveredAt.Value > latestDeliveredAt.Value))
+                    {
+                        latestDeliveredAt = deliveredAt;
+                    }
+                }
+
+                order.DeliveredAt = latestDeliveredAt;
             }
 
             if (node.TryGetProperty("lineItems", out JsonElement lineItems)
@@ -391,7 +1730,9 @@ query GetRecentOrders($first: Int!, $query: String) {
                         ShopifyVariantId = reader.GetSafeInt64(i++),
                         ShopifyOrderId = reader.GetSafeInt64Nullable(i++),
                         SoldOnUtc = reader.GetSafeDateTimeNullable(i++),
-                        Quantity = reader.GetSafeInt32(i++)
+                        Quantity = reader.GetSafeInt32(i++),
+                        ConditionId = reader.GetSafeInt32Nullable(i++),
+                        ConditionName = reader.GetSafeString(i++)
                     };
                 });
 
@@ -689,7 +2030,20 @@ query GetRecentOrders($first: Int!, $query: String) {
         private static DateTime GetDateTime(JsonElement element, string propertyName)
         {
             string? raw = GetString(element, propertyName);
-            return DateTime.TryParse(raw, out DateTime result) ? result : DateTime.MinValue;
+            return DateTime.TryParse(raw, out DateTime result)
+                ? result
+                : DateTime.MinValue;
+        }
+
+        private static DateTime? GetDateTimeNullable(
+            JsonElement element,
+            string propertyName)
+        {
+            string? raw = GetString(element, propertyName);
+
+            return DateTime.TryParse(raw, out DateTime result)
+                ? result
+                : null;
         }
     }
 }

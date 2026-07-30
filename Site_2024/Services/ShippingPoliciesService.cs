@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
 using Site_2024.Web.Api.Data;
@@ -55,8 +55,9 @@ namespace Site_2024.Web.Api.Services
 
                     policy.Id = reader.GetSafeInt32(i++);
                     policy.Name = reader.GetSafeString(i++);
-                    policy.ShopifyProfileId = reader.GetSafeInt64(i++);
+                    policy.ShopifyProfileId = reader.GetSafeInt64Nullable(i++);
                     policy.IsActive = reader.GetSafeBool(i++);
+                    policy.AllowsOnlineCheckout = reader.GetSafeBool(i++);
                     policy.DateCreated = reader.GetSafeDateTime(i++);
                     policy.DateModified = reader.GetSafeDateTime(i++);
 
@@ -65,6 +66,17 @@ namespace Site_2024.Web.Api.Services
                 });
 
             return list;
+        }
+
+        public void UpdateShopifyProfileId(int id, long shopifyProfileId)
+        {
+            _data.ExecuteNonQuery(
+                "[dbo].[ShippingPolicies_UpdateShopifyProfileId]",
+                inputParamMapper: col =>
+                {
+                    col.AddWithValue("@Id", id);
+                    col.AddWithValue("@ShopifyProfileId", shopifyProfileId);
+                });
         }
     }
 }

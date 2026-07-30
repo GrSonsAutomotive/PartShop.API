@@ -73,6 +73,13 @@ namespace Site_2024.Web.Api.Services
                     continue;
                 }
 
+                if (!part.AllowsOnlineCheckout)
+                {
+                    errors.Add(
+                        $"{part.PartName} requires a custom shipping quote and cannot be purchased through Shopify. Please contact GR & Sons directly.");
+                    continue;
+                }
+
                 if (!part.ShopifyVariantId.HasValue ||
                     part.ShopifyVariantId.Value <= 0)
                 {
@@ -309,6 +316,12 @@ namespace Site_2024.Web.Api.Services
                                 reader.GetSafeInt32(index++),
                             AvailableStatus =
                                 reader.GetSafeString(index++),
+                            ShippingPolicyId =
+                                reader.GetSafeInt32Nullable(index++),
+                            ShippingPolicyName =
+                                reader.GetSafeString(index++),
+                            AllowsOnlineCheckout =
+                                reader.GetSafeBool(index++),
                             ShopifyProductId =
                                 reader.GetSafeInt64Nullable(
                                     index++),

@@ -11,6 +11,9 @@ namespace Site_2024.Web.Api.Models
         public string? DisplayFulfillmentStatus { get; set; }
         public decimal TotalPrice { get; set; }
         public string? CurrencyCode { get; set; }
+        public DateTime? DeliveredAt { get; set; }
+        public string? DestinationCountryCode { get; set; }
+        public bool IsInternational { get; set; }
 
         // Pulled live from Shopify for display only. Do not persist this in Site_2024.
         public string? CustomerDisplayName { get; set; }

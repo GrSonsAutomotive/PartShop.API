@@ -186,12 +186,23 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(code, response);
                 }
 
+                if (part.ShippingPolicy?.AllowsOnlineCheckout == false)
+                {
+                    code = 400;
+                    response = new ErrorResponse(
+                        "This item requires a custom shipping quote and cannot be published for Shopify checkout.");
+                    return StatusCode(code, response);
+                }
+
                 if (!part.ShopifyProductId.HasValue)
                 {
                     code = 400;
                     response = new ErrorResponse("This part has not been synced to Shopify yet.");
                     return StatusCode(code, response);
                 }
+
+                // Ensure the selected Site_2024 shipping tier is assigned before publishing.
+                await _shopifyPartSyncService.SyncShippingProfileForPartAsync(id);
 
                 // Publish uses the latest local quantity, price, SKU, and photos.
                 ShopifyProductInventorySyncResult inventoryResult =
@@ -262,6 +273,8 @@ namespace Site_2024.Web.Api.Controllers
                         "This part is missing one or more Shopify IDs.");
                     return StatusCode(code, response);
                 }
+
+                await _shopifyPartSyncService.SyncShippingProfileForPartAsync(id);
 
                 ShopifyProductInventorySyncResult inventoryResult =
                     await _shopifyAdminService.SyncProductDetailsForPartAsync(part);
@@ -545,34 +558,63 @@ namespace Site_2024.Web.Api.Controllers
                     ShopifySyncSucceeded = false
                 };
 
-                // Quantity changes are automatically pushed to Shopify when
-                // this part has a complete Shopify inventory mapping.
-                if (model.Quantity.HasValue)
+                // Quantity and shipping-policy changes are automatically pushed to Shopify.
+                if (model.Quantity.HasValue || model.ShippingPolicyId.HasValue)
                 {
                     Part updatedPart = _service.GetPartById(id);
 
-                    if (updatedPart?.ShopifyProductId.HasValue == true &&
-                        updatedPart.ShopifyVariantId.HasValue &&
-                        updatedPart.ShopifyInventoryItemId.HasValue)
+                    bool hasShopifyProduct =
+                        updatedPart?.ShopifyProductId.HasValue == true;
+
+                    bool hasCompleteShopifyMapping =
+                        hasShopifyProduct &&
+                        updatedPart!.ShopifyVariantId.HasValue &&
+                        updatedPart.ShopifyInventoryItemId.HasValue;
+
+                    bool isContactOnly =
+                        updatedPart?.ShippingPolicy?.AllowsOnlineCheckout == false;
+
+                    if (hasShopifyProduct)
                     {
                         result.ShopifySyncAttempted = true;
 
                         try
                         {
-                            ShopifyProductInventorySyncResult shopifyResult =
-                                await _shopifyAdminService.SyncProductDetailsForPartAsync(updatedPart);
+                            // Changing to Calculated shipping makes the listing
+                            // contact-only. Immediately move any Shopify product
+                            // back to Draft so it cannot be purchased directly.
+                            if (model.ShippingPolicyId.HasValue && isContactOnly)
+                            {
+                                await _shopifyAdminService
+                                    .UnpublishProductForPartAsync(updatedPart!);
+                            }
+                            else if (model.ShippingPolicyId.HasValue &&
+                                     hasCompleteShopifyMapping)
+                            {
+                                await _shopifyPartSyncService
+                                    .SyncShippingProfileForPartAsync(id);
+                            }
+
+                            ShopifyProductInventorySyncResult? shopifyResult = null;
+
+                            if (model.Quantity.HasValue &&
+                                hasCompleteShopifyMapping)
+                            {
+                                shopifyResult = await _shopifyAdminService
+                                    .SyncProductDetailsForPartAsync(updatedPart!);
+                            }
 
                             result.ShopifySyncSucceeded = true;
-                            result.ShopifyQuantity = shopifyResult.Quantity;
+                            result.ShopifyQuantity = shopifyResult?.Quantity;
                         }
                         catch (Exception shopifyEx)
                         {
                             result.Warning =
-                                "The local quantity was saved, but Shopify inventory did not sync. Use Sync with Shopify to retry.";
+                                "The local change was saved, but Shopify did not sync. Use Sync with Shopify to retry.";
 
                             Logger.LogError(
                                 shopifyEx,
-                                "Automatic Shopify quantity sync failed after local update for PartId {PartId}.",
+                                "Automatic Shopify sync failed after local update for PartId {PartId}.",
                                 id);
                         }
                     }

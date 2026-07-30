@@ -47,7 +47,9 @@ builder.Services.AddCors(options =>
             .WithOrigins(
                 "http://localhost:3000",
                 "https://red-pond-0503f431e.2.azurestaticapps.net",
-                "https://red-pond-0503f431e-1.westus2.2.azurestaticapps.net"
+                "https://red-pond-0503f431e-1.westus2.2.azurestaticapps.net",
+                "https://grsonsautomotive.com",
+                "https://www.grsonsautomotive.com"
             )
             .AllowAnyMethod()
             .AllowAnyHeader()
@@ -88,7 +90,9 @@ builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("PartsWrite", p => p.RequireRole("AdminLow", "AdminHigh"));
     options.AddPolicy("PartsDelete", p => p.RequireRole("AdminHigh"));
-    options.AddPolicy("AdminAction", p => p.RequireRole("AdminLow", "AdminHigh")); // if you want broad internal audit access
+    options.AddPolicy("AdminAction", p => p.RequireRole("AdminLow", "AdminHigh")); // broad internal review access
+    options.AddPolicy("RefundCommit", p => p.RequireRole("AdminHigh"));
+    options.AddPolicy("InventoryDispositionCommit", p => p.RequireRole("AdminHigh"));
 });
 
 
@@ -115,6 +119,8 @@ builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IConditionService, ConditionService>();
 builder.Services.AddScoped<IShippingPoliciesService, ShippingPoliciesService>();
 builder.Services.AddScoped<IRefundRequestService, RefundRequestService>();
+builder.Services.AddScoped<IRefundFinalizationService, RefundFinalizationService>();
+builder.Services.AddScoped<IRefundInventoryDispositionService, RefundInventoryDispositionService>();
 builder.Services.AddScoped<IAdminDiscountCodeService, AdminDiscountCodeService>();
 
 builder.Services.Configure<ContactEmailSettings>(
@@ -129,6 +135,7 @@ builder.Services.AddHttpClient<IShopifyTokenService, ShopifyTokenService>();
 builder.Services.AddHttpClient<IShopifyAdminService, ShopifyAdminService>();
 builder.Services.AddScoped<IShopifyPartSyncService, ShopifyPartSyncService>();
 builder.Services.AddHttpClient<IShopifyOrderService, ShopifyOrderService>();
+builder.Services.AddHttpClient<IShopifyRefundService, ShopifyRefundService>();
 builder.Services.AddScoped<IShopifyWebhookService, ShopifyWebhookService>();
 builder.Services.AddHttpClient<IShopifyWebhookSubscriptionService, ShopifyWebhookSubscriptionService>();
 builder.Services.AddScoped<IShopifyCheckoutService, ShopifyCheckoutService>();
