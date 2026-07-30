@@ -9,6 +9,9 @@ namespace Site_2024.Web.Api.Models
         public int Quantity { get; set; }
         public int AvailableId { get; set; }
         public string AvailableStatus { get; set; } = string.Empty;
+        public int? ShippingPolicyId { get; set; }
+        public string ShippingPolicyName { get; set; } = string.Empty;
+        public bool AllowsOnlineCheckout { get; set; } = true;
         public long? ShopifyProductId { get; set; }
         public long? ShopifyVariantId { get; set; }
         public long? ShopifyOrderId { get; set; }

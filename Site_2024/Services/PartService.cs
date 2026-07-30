@@ -564,6 +564,7 @@ namespace Site_2024.Web.Api.Services
             part.Condition.Name = reader.GetSafeString(startingIndex++);
             part.ShippingPolicy.Id = reader.GetSafeInt32(startingIndex++);
             part.ShippingPolicy.Name = reader.GetSafeString(startingIndex++);
+            part.ShippingPolicy.AllowsOnlineCheckout = reader.GetSafeBool(startingIndex++);
             part.Location.Id = reader.GetSafeInt32(startingIndex++);
             part.Location.Site.Id = reader.GetSafeInt32(startingIndex++);
             part.Location.Site.Name = reader.GetSafeString(startingIndex++);
@@ -609,6 +610,7 @@ namespace Site_2024.Web.Api.Services
             part.Make.Model = new Model();
             part.Available = new Available();
             part.Condition = new Condition();
+            part.ShippingPolicy = new ShippingPolicy();
 
             part.Id = reader.GetSafeInt32(startingIndex++);
             part.Name = reader.GetSafeString(startingIndex++);
@@ -625,6 +627,9 @@ namespace Site_2024.Web.Api.Services
             part.Quantity = reader.GetSafeInt32(startingIndex++);
             part.Condition.Id = reader.GetSafeInt32(startingIndex++);
             part.Condition.Name = reader.GetSafeString(startingIndex++);
+            part.ShippingPolicy.Id = reader.GetSafeInt32(startingIndex++);
+            part.ShippingPolicy.Name = reader.GetSafeString(startingIndex++);
+            part.ShippingPolicy.AllowsOnlineCheckout = reader.GetSafeBool(startingIndex++);
 
             string imagePath = reader.GetSafeString(startingIndex++);
             part.Image = string.IsNullOrEmpty(imagePath)

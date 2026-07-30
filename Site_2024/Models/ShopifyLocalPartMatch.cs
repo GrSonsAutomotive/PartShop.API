@@ -23,6 +23,14 @@ namespace Site_2024.Web.Api.Models
         public long? ShopifyOrderId { get; set; }
         public DateTime? SoldOnUtc { get; set; }
         public int Quantity { get; set; }
+        public int? ConditionId { get; set; }
+        public string? ConditionName { get; set; }
+
+        public bool IsPartsNotWorking =>
+            string.Equals(
+                ConditionName?.Trim(),
+                "Parts / Not Working",
+                StringComparison.OrdinalIgnoreCase);
 
         public string LocationCode
         {

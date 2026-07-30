@@ -113,6 +113,97 @@ mutation CreateSitePartProduct($product: ProductCreateInput!) {
             };
         }
 
+        public async Task<List<ShopifyDeliveryProfileResult>> GetDeliveryProfilesAsync()
+        {
+            string query = @"
+query GetDeliveryProfiles {
+  deliveryProfiles(first: 100, merchantOwnedOnly: true) {
+    nodes {
+      id
+      name
+      default
+    }
+  }
+}";
+
+            using JsonDocument doc = await SendGraphQlAsync(query, new { });
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement topErrors))
+                throw new ApplicationException($"Shopify GraphQL error: {topErrors}");
+
+            JsonElement nodes = root.GetProperty("data")
+                .GetProperty("deliveryProfiles")
+                .GetProperty("nodes");
+
+            List<ShopifyDeliveryProfileResult> profiles = new();
+
+            foreach (JsonElement node in nodes.EnumerateArray())
+            {
+                string gid = node.GetProperty("id").GetString() ?? string.Empty;
+                profiles.Add(new ShopifyDeliveryProfileResult
+                {
+                    Gid = gid,
+                    Id = ExtractNumericId(gid),
+                    Name = node.GetProperty("name").GetString() ?? string.Empty,
+                    IsDefault = node.GetProperty("default").GetBoolean()
+                });
+            }
+
+            return profiles;
+        }
+
+        public async Task AssignVariantToDeliveryProfileAsync(long variantId, long deliveryProfileId)
+        {
+            if (variantId <= 0)
+                throw new ApplicationException("A valid Shopify variant ID is required.");
+
+            if (deliveryProfileId <= 0)
+                throw new ApplicationException("A valid Shopify delivery profile ID is required.");
+
+            string mutation = @"
+mutation AssignVariantToDeliveryProfile($id: ID!, $profile: DeliveryProfileInput!) {
+  deliveryProfileUpdate(id: $id, profile: $profile) {
+    profile {
+      id
+      name
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}";
+
+            var variables = new
+            {
+                id = $"gid://shopify/DeliveryProfile/{deliveryProfileId}",
+                profile = new
+                {
+                    variantsToAssociate = new[]
+                    {
+                        $"gid://shopify/ProductVariant/{variantId}"
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables);
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement topErrors))
+                throw new ApplicationException($"Shopify GraphQL error: {topErrors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("deliveryProfileUpdate");
+            JsonElement userErrors = payload.GetProperty("userErrors");
+
+            if (userErrors.GetArrayLength() > 0)
+            {
+                string messages = string.Join("; ", userErrors.EnumerateArray()
+                    .Select(e => e.GetProperty("message").GetString()));
+                throw new ApplicationException($"Shopify deliveryProfileUpdate failed: {messages}");
+            }
+        }
+
         public async Task<List<ShopifyLocationResult>> GetLocationsAsync()
         {
             string query = @"
@@ -984,6 +1075,179 @@ mutation AddSiteProductMedia(
             }
 
             return $"{prefix}{suffix}";
+        }
+
+        public async Task<ShopifyInventoryQuantityCommitResult> SetInventoryQuantityForRefundAsync(
+            long inventoryItemId,
+            int previousQuantity,
+            int newQuantity,
+            string idempotencyKey,
+            string referenceDocumentUri)
+        {
+            if (inventoryItemId <= 0)
+            {
+                throw new ApplicationException(
+                    "A valid Shopify inventory item ID is required.");
+            }
+
+            if (previousQuantity < 0 || newQuantity < 0)
+            {
+                throw new ApplicationException(
+                    "Shopify inventory quantities cannot be negative.");
+            }
+
+            if (string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                throw new ApplicationException(
+                    "A deterministic Shopify inventory idempotency key is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(referenceDocumentUri))
+            {
+                throw new ApplicationException(
+                    "A refund inventory reference document URI is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(_settings.DefaultLocationGid))
+            {
+                throw new ApplicationException(
+                    "ShopifySettings:DefaultLocationGid is missing.");
+            }
+
+            string inventoryItemGid =
+                $"gid://shopify/InventoryItem/{inventoryItemId}";
+            string locationGid = _settings.DefaultLocationGid.Trim();
+
+            await EnsureInventoryActiveAtLocationAsync(
+                inventoryItemGid,
+                locationGid);
+
+            string mutation = @"
+mutation SetRefundInventoryQuantity(
+  $input: InventorySetQuantitiesInput!,
+  $idempotencyKey: String!
+) {
+  inventorySetQuantities(input: $input)
+    @idempotent(key: $idempotencyKey) {
+    inventoryAdjustmentGroup {
+      reason
+      referenceDocumentUri
+      changes {
+        name
+        delta
+        quantityAfterChange
+      }
+    }
+    userErrors {
+      code
+      field
+      message
+    }
+  }
+}";
+
+            var variables = new
+            {
+                idempotencyKey = idempotencyKey.Trim(),
+                input = new
+                {
+                    name = "available",
+                    reason = "correction",
+                    referenceDocumentUri = referenceDocumentUri.Trim(),
+                    quantities = new[]
+                    {
+                        new
+                        {
+                            inventoryItemId = inventoryItemGid,
+                            locationId = locationGid,
+                            quantity = newQuantity,
+                            changeFromQuantity = previousQuantity
+                        }
+                    }
+                }
+            };
+
+            using JsonDocument doc =
+                await SendGraphQlAsync(mutation, variables);
+
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement topErrors))
+            {
+                throw new ApplicationException(
+                    $"Shopify GraphQL error: {topErrors}");
+            }
+
+            JsonElement payload = root
+                .GetProperty("data")
+                .GetProperty("inventorySetQuantities");
+
+            ThrowIfUserErrors(
+                payload.GetProperty("userErrors"),
+                "Shopify refund inventory synchronization failed");
+
+            ShopifyInventoryQuantityCommitResult result =
+                new ShopifyInventoryQuantityCommitResult
+                {
+                    InventoryItemId = inventoryItemId,
+                    InventoryItemGid = inventoryItemGid,
+                    LocationGid = locationGid,
+                    PreviousQuantity = previousQuantity,
+                    NewQuantity = newQuantity,
+                    IdempotencyKey = idempotencyKey.Trim(),
+                    ReferenceDocumentUri = referenceDocumentUri.Trim()
+                };
+
+            JsonElement adjustmentGroup =
+                payload.GetProperty("inventoryAdjustmentGroup");
+
+            if (adjustmentGroup.ValueKind != JsonValueKind.Null
+                && adjustmentGroup.TryGetProperty(
+                    "changes",
+                    out JsonElement changes)
+                && changes.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement change in changes.EnumerateArray())
+                {
+                    if (!change.TryGetProperty(
+                            "name",
+                            out JsonElement name)
+                        || !string.Equals(
+                            name.GetString(),
+                            "available",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (change.TryGetProperty(
+                            "quantityAfterChange",
+                            out JsonElement after)
+                        && after.ValueKind != JsonValueKind.Null)
+                    {
+                        result.QuantityAfterChange = after.GetInt32();
+                    }
+
+                    if (change.TryGetProperty(
+                            "delta",
+                            out JsonElement delta)
+                        && delta.ValueKind != JsonValueKind.Null)
+                    {
+                        result.Delta = delta.GetInt32();
+                    }
+
+                    break;
+                }
+            }
+
+            if (result.QuantityAfterChange.HasValue
+                && result.QuantityAfterChange.Value != newQuantity)
+            {
+                throw new ApplicationException(
+                    $"Shopify reported quantity {result.QuantityAfterChange.Value}, but Site_2024 expected {newQuantity}.");
+            }
+
+            return result;
         }
 
         private async Task<JsonDocument> SendGraphQlAsync(string query, object variables)

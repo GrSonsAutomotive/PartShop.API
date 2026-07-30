@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Site_2024.Web.Api.Interfaces;
@@ -55,6 +55,44 @@ namespace Site_2024.Web.Api.Controllers
             }
 
             return StatusCode(code, response);
+        }
+
+        [HttpGet("shopify/profiles")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<List<Site_2024.Web.Api.Models.Shopify.ShopifyDeliveryProfileResult>>>> GetShopifyProfiles(
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            try
+            {
+                var profiles = await shopifyAdminService.GetDeliveryProfilesAsync();
+                return Ok(new ItemResponse<List<Site_2024.Web.Api.Models.Shopify.ShopifyDeliveryProfileResult>>
+                {
+                    Item = profiles
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to load Shopify delivery profiles.");
+                return StatusCode(500, new ErrorResponse(ex.Message));
+            }
+        }
+
+        [HttpPut("{id:int}/shopify-profile")]
+        [Authorize(Policy = "AdminAction")]
+        public ActionResult<BaseResponse> UpdateShopifyProfile(
+            int id,
+            [FromBody] ShippingPolicyShopifyProfileUpdateRequest model)
+        {
+            try
+            {
+                _service.UpdateShopifyProfileId(id, model.ShopifyProfileId);
+                return Ok(new SuccessResponse());
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to map ShippingPolicy {ShippingPolicyId} to Shopify profile.", id);
+                return StatusCode(500, new ErrorResponse(ex.Message));
+            }
         }
 
         [HttpPost]
