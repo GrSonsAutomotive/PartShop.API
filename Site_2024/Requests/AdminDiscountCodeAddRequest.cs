@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
 namespace Site_2024.Web.Api.Requests
 {
@@ -23,11 +23,15 @@ namespace Site_2024.Web.Api.Requests
         [Required]
         [StringLength(50)]
         public string AppliesToType { get; set; } = string.Empty;
-        // General, Product, Variant, or Part
+        // General, Product, Variant, Part, or CollectionRule
 
         public int? PartId { get; set; }
         public long? ShopifyProductId { get; set; }
         public long? ShopifyVariantId { get; set; }
+
+        public bool MatchAllRules { get; set; } = true;
+        public bool AutoMaintainEligibility { get; set; } = true;
+        public List<AdminDiscountCodeRuleAddRequest> Rules { get; set; } = new();
 
         [EmailAddress]
         [StringLength(256)]
@@ -43,5 +47,22 @@ namespace Site_2024.Web.Api.Requests
 
         [StringLength(2000)]
         public string? AdminNotes { get; set; }
+
+        public bool ShowSiteBanner { get; set; }
+
+        [StringLength(200)]
+        public string? BannerHeadline { get; set; }
+
+        [StringLength(500)]
+        public string? BannerMessage { get; set; }
+
+        [StringLength(100)]
+        public string? BannerLinkText { get; set; }
+
+        [StringLength(500)]
+        public string? BannerLinkUrl { get; set; }
+
+        [Range(0, 1000000)]
+        public int BannerPriority { get; set; }
     }
 }

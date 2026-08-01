@@ -276,6 +276,7 @@ query GetLocations {
 
             int quantity = part.Quantity <= 0 ? 0 : part.Quantity;
 
+            await SyncProductTagsForPartAsync(part);
             await UpdateVariantPriceAsync(productGid, variantGid, part.Price);
             await UpdateInventoryItemAsync(inventoryItemGid, sku);
             await EnsureInventoryActiveAtLocationAsync(inventoryItemGid, locationGid);
@@ -296,6 +297,60 @@ query GetLocations {
             };
         }
 
+
+        public async Task SyncProductTagsForPartAsync(Part part)
+        {
+            if (!part.ShopifyProductId.HasValue)
+            {
+                throw new ApplicationException(
+                    "Part does not have a ShopifyProductId. Sync it to Shopify before syncing tags.");
+            }
+
+            string productGid = $"gid://shopify/Product/{part.ShopifyProductId.Value}";
+            string[] existingTags = await GetProductTagsAsync(productGid);
+            string[] managedTags = ShopifyManagedTagBuilder.BuildManagedTags(part);
+            string[] mergedTags = ShopifyManagedTagBuilder.MergeWithExistingTags(existingTags, managedTags);
+
+            string mutation = @"
+mutation UpdateSitePartProduct($product: ProductUpdateInput!) {
+  productUpdate(product: $product) {
+    product {
+      id
+      title
+      tags
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}";
+
+            var variables = new
+            {
+                product = new
+                {
+                    id = productGid,
+                    title = BuildTitle(part),
+                    descriptionHtml = BuildDescriptionHtml(part),
+                    tags = mergedTags
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables);
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement topErrors))
+            {
+                throw new ApplicationException($"Shopify GraphQL error: {topErrors}");
+            }
+
+            JsonElement payload = root
+                .GetProperty("data")
+                .GetProperty("productUpdate");
+
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify product tag sync failed");
+        }
 
         public async Task<ShopifyProductMediaSyncResult> SyncProductImagesAsync(
             Part part,
@@ -441,6 +496,102 @@ mutation DeactivateDiscountCode($id: ID!) {
                 Title = title,
                 Status = status,
                 EndsAt = endsAt
+            };
+        }
+
+        public async Task<ShopifyCollectionCreateResult> CreateAutomatedCollectionForDiscountAsync(
+            AdminDiscountCode discount)
+        {
+            if (!string.Equals(
+                    discount.AppliesToType,
+                    "CollectionRule",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ApplicationException(
+                    "Only CollectionRule discounts can create an automated Shopify collection.");
+            }
+
+            if (discount.Rules == null || discount.Rules.Count == 0)
+            {
+                throw new ApplicationException(
+                    "At least one collection rule is required before creating the Shopify collection.");
+            }
+
+            string title = $"Site Discount {discount.Id}: {discount.Title ?? discount.Code}";
+            string handle = ShopifyManagedTagBuilder.BuildCollectionHandle(discount.Id, discount.Code);
+
+            // Site_2024 is currently pinned to Shopify Admin API 2026-04.
+            // That API version uses the legacy CollectionInput/ruleSet shape.
+            // Shopify 2026-07 introduces the newer collection/sources model.
+            string mutation = @"
+mutation CreateAutomatedDiscountCollection($input: CollectionInput!) {
+  collectionCreate(input: $input) {
+    collection {
+      id
+      title
+      handle
+      ruleSet {
+        appliedDisjunctively
+        rules {
+          column
+          relation
+          condition
+        }
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}";
+
+            var rules = discount.Rules
+                .OrderBy(rule => rule.SortOrder)
+                .ThenBy(rule => rule.Id)
+                .Select(rule => new
+                {
+                    column = "TAG",
+                    relation = "EQUALS",
+                    condition = rule.ShopifyTag
+                })
+                .ToArray();
+
+            var variables = new
+            {
+                input = new
+                {
+                    title,
+                    handle,
+                    ruleSet = new
+                    {
+                        appliedDisjunctively = !discount.MatchAllRules,
+                        rules
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables);
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement topErrors))
+            {
+                throw new ApplicationException($"Shopify GraphQL error: {topErrors}");
+            }
+
+            JsonElement payload = root
+                .GetProperty("data")
+                .GetProperty("collectionCreate");
+
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify collectionCreate failed");
+
+            JsonElement collection = payload.GetProperty("collection");
+
+            return new ShopifyCollectionCreateResult
+            {
+                CollectionGid = collection.GetProperty("id").GetString() ?? string.Empty,
+                Title = collection.GetProperty("title").GetString() ?? title,
+                Handle = collection.GetProperty("handle").GetString() ?? handle
             };
         }
 
@@ -1284,6 +1435,38 @@ mutation SetRefundInventoryQuantity(
             return JsonDocument.Parse(responseText);
         }
 
+        private async Task<string[]> GetProductTagsAsync(string productGid)
+        {
+            string query = @"
+query GetSitePartProductTags($id: ID!) {
+  product(id: $id) {
+    id
+    tags
+  }
+}";
+
+            using JsonDocument doc = await SendGraphQlAsync(query, new { id = productGid });
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement topErrors))
+            {
+                throw new ApplicationException($"Shopify GraphQL error: {topErrors}");
+            }
+
+            JsonElement product = root.GetProperty("data").GetProperty("product");
+
+            if (product.ValueKind == JsonValueKind.Null)
+            {
+                throw new ApplicationException("Shopify product was not found while syncing tags.");
+            }
+
+            return product.GetProperty("tags")
+                .EnumerateArray()
+                .Select(tag => tag.GetString() ?? string.Empty)
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .ToArray();
+        }
+
         private static string BuildTitle(Part part)
         {
             string partNumber = string.IsNullOrWhiteSpace(part.PartNumber)
@@ -1314,28 +1497,7 @@ mutation SetRefundInventoryQuantity(
 
         private static string[] BuildTags(Part part)
         {
-            List<string> tags = new List<string>
-            {
-                "Site_2024",
-                $"SitePartId_{part.Id}"
-            };
-
-            if (!string.IsNullOrWhiteSpace(part.Catagory?.Name))
-            {
-                tags.Add(part.Catagory.Name);
-            }
-
-            if (!string.IsNullOrWhiteSpace(part.Make?.Company))
-            {
-                tags.Add(part.Make.Company);
-            }
-
-            if (!string.IsNullOrWhiteSpace(part.Make?.Model?.Name))
-            {
-                tags.Add(part.Make.Model.Name);
-            }
-
-            return tags.ToArray();
+            return ShopifyManagedTagBuilder.BuildManagedTags(part);
         }
 
         private static string NormalizeShopDomain(string shopDomain)
@@ -1672,13 +1834,34 @@ mutation InventorySet($input: InventorySetQuantitiesInput!, $idempotencyKey: Str
                     {
                         productsToAdd = new[]
                         {
-                    $"gid://shopify/Product/{discount.ShopifyProductId.Value}"
-                }
+                            $"gid://shopify/Product/{discount.ShopifyProductId.Value}"
+                        }
                     }
                 };
             }
 
-            throw new ApplicationException("AppliesToType must be General, Product, Variant, or Part.");
+            if (discount.AppliesToType == "CollectionRule")
+            {
+                if (string.IsNullOrWhiteSpace(discount.ShopifyCollectionGid))
+                {
+                    throw new ApplicationException(
+                        "Collection-rule discount is missing ShopifyCollectionGid.");
+                }
+
+                return new Dictionary<string, object?>
+                {
+                    ["collections"] = new
+                    {
+                        add = new[]
+                        {
+                            discount.ShopifyCollectionGid
+                        }
+                    }
+                };
+            }
+
+            throw new ApplicationException(
+                "AppliesToType must be General, Product, Variant, Part, or CollectionRule.");
         }
     }
 }

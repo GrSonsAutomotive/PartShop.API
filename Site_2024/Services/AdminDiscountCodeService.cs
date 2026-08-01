@@ -1,10 +1,11 @@
-﻿using Site_2024.Web.Api.Constructors;
+using Site_2024.Web.Api.Constructors;
 using Site_2024.Web.Api.Extensions;
 using Site_2024.Web.Api.Interfaces;
 using Site_2024.Web.Api.Models;
 using Site_2024.Web.Api.Requests;
 using System.Data;
 using System.Data.SqlClient;
+using System.Text.Json;
 
 namespace Site_2024.Web.Api.Services
 {
@@ -19,6 +20,8 @@ namespace Site_2024.Web.Api.Services
 
         public int Add(AdminDiscountCodeAddRequest model, int? userId)
         {
+            ValidateCollectionRules(model);
+
             int id = 0;
             const string procName = "[dbo].[AdminDiscountCodes_Insert]";
 
@@ -26,10 +29,9 @@ namespace Site_2024.Web.Api.Services
                 inputParamMapper: delegate (SqlParameterCollection col)
                 {
                     AddCommonParams(model, col);
-
                     col.AddWithValue("@CreatedByUserId", userId.HasValue ? userId.Value : DBNull.Value);
 
-                    SqlParameter idOut = new SqlParameter("@Id", SqlDbType.Int)
+                    SqlParameter idOut = new("@Id", SqlDbType.Int)
                     {
                         Direction = ParameterDirection.Output,
                         Value = 0
@@ -54,22 +56,82 @@ namespace Site_2024.Web.Api.Services
             const string procName = "[dbo].[AdminDiscountCodes_GetById]";
 
             _data.ExecuteCmd(procName,
-                inputParamMapper: delegate (SqlParameterCollection col)
-                {
-                    col.AddWithValue("@Id", id);
-                },
+                inputParamMapper: col => col.AddWithValue("@Id", id),
                 singleRecordMapper: delegate (IDataReader reader, short set)
                 {
                     discount = MapSingleDiscount(reader);
                 });
 
+            if (discount != null &&
+                string.Equals(discount.AppliesToType, "CollectionRule", StringComparison.OrdinalIgnoreCase))
+            {
+                discount.Rules = GetRulesByDiscountId(id);
+            }
+
             return discount;
         }
 
-        public Paged<AdminDiscountCode>? GetPaginated(int pageIndex, int pageSize, AdminDiscountCodeSearchRequest model)
+        public PublicSaleBanner? GetActiveSiteBanner(DateTime utcNow)
+        {
+            PublicSaleBanner? banner = null;
+            const string procName = "[dbo].[AdminDiscountCodes_GetActiveSiteBanner]";
+
+            _data.ExecuteCmd(procName,
+                inputParamMapper: col => col.AddWithValue("@UtcNow", utcNow),
+                singleRecordMapper: delegate (IDataReader reader, short set)
+                {
+                    int index = 0;
+                    banner = new PublicSaleBanner
+                    {
+                        Id = reader.GetInt32(index++),
+                        Code = reader.GetSafeString(index++),
+                        Headline = reader.GetSafeString(index++),
+                        Message = reader.GetSafeString(index++),
+                        LinkText = reader.GetSafeString(index++),
+                        LinkUrl = reader.GetSafeString(index++),
+                        StartsAtUtc = reader.GetSafeDateTimeNullable(index++),
+                        EndsAtUtc = reader.GetSafeDateTimeNullable(index++)
+                    };
+                });
+
+            return banner;
+        }
+
+        public List<AdminDiscountCodeRule> GetRulesByDiscountId(int discountId)
+        {
+            List<AdminDiscountCodeRule> rules = new();
+            const string procName = "[dbo].[AdminDiscountCodeRules_GetByDiscountId]";
+
+            _data.ExecuteCmd(procName,
+                inputParamMapper: col => col.AddWithValue("@AdminDiscountCodeId", discountId),
+                singleRecordMapper: delegate (IDataReader reader, short set)
+                {
+                    int index = 0;
+                    rules.Add(new AdminDiscountCodeRule
+                    {
+                        Id = reader.GetInt32(index++),
+                        AdminDiscountCodeId = reader.GetInt32(index++),
+                        RuleType = reader.GetSafeString(index++),
+                        SourceId = reader.GetSafeInt32Nullable(index++),
+                        RuleValue = reader.GetSafeString(index++),
+                        ShopifyTag = reader.GetSafeString(index++),
+                        RuleOperator = reader.GetSafeString(index++),
+                        SortOrder = reader.GetInt32(index++),
+                        DateCreated = reader.GetDateTime(index++),
+                        DateModified = reader.GetDateTime(index++)
+                    });
+                });
+
+            return rules;
+        }
+
+        public Paged<AdminDiscountCode>? GetPaginated(
+            int pageIndex,
+            int pageSize,
+            AdminDiscountCodeSearchRequest model)
         {
             Paged<AdminDiscountCode>? paged = null;
-            List<AdminDiscountCode> list = null;
+            List<AdminDiscountCode>? list = null;
             int totalCount = 0;
 
             const string procName = "[dbo].[AdminDiscountCodes_GetPaginated]";
@@ -92,11 +154,7 @@ namespace Site_2024.Web.Api.Services
                         totalCount = Convert.ToInt32(reader["TotalCount"]);
                     }
 
-                    if (list == null)
-                    {
-                        list = new List<AdminDiscountCode>();
-                    }
-
+                    list ??= new List<AdminDiscountCode>();
                     list.Add(discount);
                 });
 
@@ -117,6 +175,38 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@Id", id);
                     col.AddWithValue("@ShopifyDiscountGid", model.ShopifyDiscountGid);
+                });
+        }
+
+        public void MarkCollectionCreated(
+            int id,
+            string shopifyCollectionGid,
+            string? shopifyCollectionHandle)
+        {
+            const string procName = "[dbo].[AdminDiscountCodes_MarkCollectionCreated]";
+
+            _data.ExecuteNonQuery(procName,
+                inputParamMapper: delegate (SqlParameterCollection col)
+                {
+                    col.AddWithValue("@Id", id);
+                    col.AddWithValue("@ShopifyCollectionGid", shopifyCollectionGid);
+                    col.AddWithValue("@ShopifyCollectionHandle",
+                        string.IsNullOrWhiteSpace(shopifyCollectionHandle)
+                            ? DBNull.Value
+                            : shopifyCollectionHandle);
+                });
+        }
+
+        public void MarkCollectionSync(int id, string status, string? error = null)
+        {
+            const string procName = "[dbo].[AdminDiscountCodes_MarkCollectionSync]";
+
+            _data.ExecuteNonQuery(procName,
+                inputParamMapper: delegate (SqlParameterCollection col)
+                {
+                    col.AddWithValue("@Id", id);
+                    col.AddWithValue("@SyncStatus", status);
+                    col.AddWithValue("@SyncError", string.IsNullOrWhiteSpace(error) ? DBNull.Value : error);
                 });
         }
 
@@ -147,8 +237,12 @@ namespace Site_2024.Web.Api.Services
                 });
         }
 
-        private static void AddCommonParams(AdminDiscountCodeAddRequest model, SqlParameterCollection col)
+        private static void AddCommonParams(
+            AdminDiscountCodeAddRequest model,
+            SqlParameterCollection col)
         {
+            string? rulesJson = BuildRulesJson(model);
+
             col.AddWithValue("@Code", model.Code);
             col.AddWithValue("@Title", string.IsNullOrWhiteSpace(model.Title) ? DBNull.Value : model.Title);
             col.AddWithValue("@DiscountType", model.DiscountType);
@@ -160,20 +254,115 @@ namespace Site_2024.Web.Api.Services
             col.AddWithValue("@ShopifyVariantId", model.ShopifyVariantId.HasValue ? model.ShopifyVariantId.Value : DBNull.Value);
 
             col.AddWithValue("@CustomerEmail", string.IsNullOrWhiteSpace(model.CustomerEmail) ? DBNull.Value : model.CustomerEmail);
-
             col.AddWithValue("@StartsAtUtc", model.StartsAtUtc.HasValue ? model.StartsAtUtc.Value : DBNull.Value);
             col.AddWithValue("@EndsAtUtc", model.EndsAtUtc.HasValue ? model.EndsAtUtc.Value : DBNull.Value);
-
             col.AddWithValue("@UsageLimit", model.UsageLimit <= 0 ? 1 : model.UsageLimit);
             col.AddWithValue("@OncePerCustomer", model.OncePerCustomer);
-
             col.AddWithValue("@AdminNotes", string.IsNullOrWhiteSpace(model.AdminNotes) ? DBNull.Value : model.AdminNotes);
+
+            col.AddWithValue("@ShowSiteBanner", model.ShowSiteBanner);
+            col.AddWithValue("@BannerHeadline", string.IsNullOrWhiteSpace(model.BannerHeadline) ? DBNull.Value : model.BannerHeadline.Trim());
+            col.AddWithValue("@BannerMessage", string.IsNullOrWhiteSpace(model.BannerMessage) ? DBNull.Value : model.BannerMessage.Trim());
+            col.AddWithValue("@BannerLinkText", string.IsNullOrWhiteSpace(model.BannerLinkText) ? DBNull.Value : model.BannerLinkText.Trim());
+            col.AddWithValue("@BannerLinkUrl", string.IsNullOrWhiteSpace(model.BannerLinkUrl) ? DBNull.Value : model.BannerLinkUrl.Trim());
+            col.AddWithValue("@BannerPriority", Math.Max(0, model.BannerPriority));
+
+            col.AddWithValue("@MatchAllRules", model.MatchAllRules);
+            col.AddWithValue("@AutoMaintainEligibility", model.AutoMaintainEligibility);
+            col.AddWithValue("@RulesJson", string.IsNullOrWhiteSpace(rulesJson) ? DBNull.Value : rulesJson);
+        }
+
+        private static string? BuildRulesJson(AdminDiscountCodeAddRequest model)
+        {
+            if (!string.Equals(model.AppliesToType, "CollectionRule", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var rules = model.Rules
+                .Select((rule, index) => new
+                {
+                    ruleType = rule.RuleType.Trim(),
+                    sourceId = rule.SourceId,
+                    ruleValue = rule.RuleValue.Trim(),
+                    shopifyTag = ShopifyManagedTagBuilder.BuildManagedTag(rule.RuleType, rule.RuleValue),
+                    sortOrder = rule.SortOrder == 0 ? index : rule.SortOrder
+                })
+                .ToArray();
+
+            return JsonSerializer.Serialize(rules);
+        }
+
+        private static void ValidateCollectionRules(AdminDiscountCodeAddRequest model)
+        {
+            ValidateBanner(model);
+
+            if (!string.Equals(model.AppliesToType, "CollectionRule", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            if (model.Rules == null || model.Rules.Count == 0)
+            {
+                throw new ApplicationException("At least one category, condition, make, model, or custom-tag rule is required.");
+            }
+
+            string[] allowedRuleTypes = { "Category", "Condition", "Make", "Model", "CustomTag" };
+
+            foreach (AdminDiscountCodeRuleAddRequest rule in model.Rules)
+            {
+                if (!allowedRuleTypes.Contains(rule.RuleType, StringComparer.OrdinalIgnoreCase))
+                {
+                    throw new ApplicationException(
+                        $"Unsupported collection rule type '{rule.RuleType}'.");
+                }
+
+                if (string.IsNullOrWhiteSpace(rule.RuleValue))
+                {
+                    throw new ApplicationException("Every collection rule requires a value.");
+                }
+            }
+
+            string[] tags = model.Rules
+                .Select(rule => ShopifyManagedTagBuilder.BuildManagedTag(rule.RuleType, rule.RuleValue))
+                .ToArray();
+
+            if (tags.Distinct(StringComparer.OrdinalIgnoreCase).Count() != tags.Length)
+            {
+                throw new ApplicationException("Collection rules cannot produce duplicate Shopify tags.");
+            }
+        }
+
+        private static void ValidateBanner(AdminDiscountCodeAddRequest model)
+        {
+            if (!model.ShowSiteBanner)
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(model.BannerMessage))
+            {
+                throw new ApplicationException("A website banner message is required when the sale banner is enabled.");
+            }
+
+            string? linkUrl = model.BannerLinkUrl?.Trim();
+            string? linkText = model.BannerLinkText?.Trim();
+
+            if (!string.IsNullOrWhiteSpace(linkText) && string.IsNullOrWhiteSpace(linkUrl))
+            {
+                throw new ApplicationException("BannerLinkUrl is required when BannerLinkText is provided.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(linkUrl) &&
+                linkUrl.StartsWith("javascript:", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ApplicationException("The banner link URL is not allowed.");
+            }
         }
 
         private static AdminDiscountCode MapSingleDiscount(IDataReader reader)
         {
-            AdminDiscountCode discount = new AdminDiscountCode();
-
+            AdminDiscountCode discount = new();
             int index = 0;
 
             discount.Id = reader.GetInt32(index++);
@@ -186,31 +375,40 @@ namespace Site_2024.Web.Api.Services
             discount.PartId = reader.GetSafeInt32Nullable(index++);
             discount.PartName = reader.GetSafeString(index++);
             discount.PartNumber = reader.GetSafeString(index++);
-
             discount.ShopifyProductId = reader.GetSafeInt64Nullable(index++);
             discount.ShopifyVariantId = reader.GetSafeInt64Nullable(index++);
-
             discount.CustomerEmail = reader.GetSafeString(index++);
-
             discount.StartsAtUtc = reader.GetSafeDateTimeNullable(index++);
             discount.EndsAtUtc = reader.GetSafeDateTimeNullable(index++);
-
             discount.UsageLimit = reader.GetInt32(index++);
             discount.OncePerCustomer = reader.GetBoolean(index++);
-
             discount.ShopifyDiscountGid = reader.GetSafeString(index++);
+
+            discount.ShopifyCollectionGid = reader.GetSafeString(index++);
+            discount.ShopifyCollectionHandle = reader.GetSafeString(index++);
+            discount.MatchAllRules = reader.GetBoolean(index++);
+            discount.AutoMaintainEligibility = reader.GetBoolean(index++);
+            discount.LastCollectionSyncUtc = reader.GetSafeDateTimeNullable(index++);
+            discount.LastCollectionSyncStatus = reader.GetSafeString(index++);
+            discount.LastCollectionSyncError = reader.GetSafeString(index++);
+            discount.RuleCount = reader.GetInt32(index++);
+            discount.RuleSummary = reader.GetSafeString(index++);
 
             discount.Status = reader.GetSafeString(index++);
             discount.UsageCount = reader.GetInt32(index++);
-
             discount.AdminNotes = reader.GetSafeString(index++);
+
+            discount.ShowSiteBanner = reader.GetBoolean(index++);
+            discount.BannerHeadline = reader.GetSafeString(index++);
+            discount.BannerMessage = reader.GetSafeString(index++);
+            discount.BannerLinkText = reader.GetSafeString(index++);
+            discount.BannerLinkUrl = reader.GetSafeString(index++);
+            discount.BannerPriority = reader.GetInt32(index++);
 
             discount.CreatedByUserId = reader.GetSafeInt32Nullable(index++);
             discount.CreatedByName = reader.GetSafeString(index++);
-
             discount.DeactivatedByUserId = reader.GetSafeInt32Nullable(index++);
             discount.DeactivatedByName = reader.GetSafeString(index++);
-
             discount.DateCreated = reader.GetDateTime(index++);
             discount.DateModified = reader.GetDateTime(index++);
             discount.DeactivatedDateUtc = reader.GetSafeDateTimeNullable(index++);

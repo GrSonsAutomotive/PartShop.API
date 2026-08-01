@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Site_2024.Web.Api.Constructors;
 using Site_2024.Web.Api.Interfaces;
@@ -47,19 +47,41 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(code, response);
                 }
 
-                // 1. Create local discount first.
-                // Your SQL insert should now resolve ShopifyProductId / ShopifyVariantId
-                // from the selected PartId.
+                // Create the local rule first so Shopify resources can be tied back
+                // to a durable Site_2024 discount ID.
                 int id = _service.Add(model, user.Id);
+                AdminDiscountCode discount = _service.GetById(id)
+                    ?? throw new ApplicationException("The discount was created but could not be reloaded.");
 
-                // 2. Reload the full discount from SQL.
-                // This is important because GetById should now include ShopifyProductId
-                // and ShopifyVariantId.
-                AdminDiscountCode discount = _service.GetById(id);
-
-                // 3. Try creating the real Shopify discount.
                 try
                 {
+                    if (string.Equals(
+                            discount.AppliesToType,
+                            "CollectionRule",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        _service.MarkCollectionSync(id, "Pending");
+
+                        ShopifyCollectionCreateResult collectionResult =
+                            await _shopifyAdminService
+                                .CreateAutomatedCollectionForDiscountAsync(discount);
+
+                        _service.MarkCollectionCreated(
+                            id,
+                            collectionResult.CollectionGid,
+                            collectionResult.Handle);
+
+                        discount = _service.GetById(id)
+                            ?? throw new ApplicationException(
+                                "The Shopify collection was created but the discount could not be reloaded.");
+
+                        Logger.LogInformation(
+                            "Shopify automated collection created for AdminDiscountCodeId {DiscountId}. CollectionGid: {CollectionGid}, Handle: {Handle}",
+                            id,
+                            collectionResult.CollectionGid,
+                            collectionResult.Handle);
+                    }
+
                     ShopifyDiscountCreateResult shopifyResult =
                         await _shopifyAdminService.CreateBasicDiscountCodeAsync(discount);
 
@@ -80,10 +102,18 @@ namespace Site_2024.Web.Api.Controllers
                         "Shopify discount sync failed for AdminDiscountCodeId {DiscountId}",
                         id);
 
+                    if (string.Equals(
+                            discount.AppliesToType,
+                            "CollectionRule",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        _service.MarkCollectionSync(id, "Error", shopifyEx.Message);
+                    }
+
                     _service.MarkError(id, shopifyEx.Message);
 
-                    // Local row was created, but Shopify failed.
-                    // We still return the local discount ID so admin can see the Error row.
+                    // The local row is retained with Error status so the admin can
+                    // inspect the collection/discount failure instead of losing the rule.
                 }
 
                 response = new ItemResponse<int> { Item = id };

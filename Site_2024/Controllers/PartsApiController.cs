@@ -304,6 +304,89 @@ namespace Site_2024.Web.Api.Controllers
             return StatusCode(code, response);
         }
 
+        [HttpPost("shopify/tags/backfill")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyTagBackfillResult>>> BackfillShopifyTags()
+        {
+            int code = 200;
+            BaseResponse response;
+
+            try
+            {
+                var user = _authService.GetCurrentUser();
+
+                if (user == null)
+                {
+                    code = 401;
+                    return StatusCode(code, new ErrorResponse("You must be logged in."));
+                }
+
+                ShopifyTagBackfillResult result = new();
+                const int pageSize = 50;
+                int pageIndex = 0;
+                bool hasNextPage;
+
+                do
+                {
+                    Paged<PartSummary>? page = _service.GetAllPaginated(pageIndex, pageSize);
+
+                    if (page == null)
+                    {
+                        break;
+                    }
+
+                    foreach (PartSummary summary in page.PagedItems)
+                    {
+                        result.PartsExamined++;
+                        Part? part = _service.GetPartById(summary.Id);
+
+                        if (part?.ShopifyProductId.HasValue != true)
+                        {
+                            result.ProductsSkipped++;
+                            continue;
+                        }
+
+                        try
+                        {
+                            await _shopifyAdminService.SyncProductTagsForPartAsync(part);
+                            result.ProductsUpdated++;
+                        }
+                        catch (Exception itemEx)
+                        {
+                            result.ProductsFailed++;
+
+                            if (result.Errors.Count < 25)
+                            {
+                                result.Errors.Add($"Part {summary.Id}: {itemEx.Message}");
+                            }
+
+                            Logger.LogError(
+                                itemEx,
+                                "Shopify managed-tag backfill failed for PartId {PartId}",
+                                summary.Id);
+                        }
+                    }
+
+                    hasNextPage = page.HasNextPage;
+                    pageIndex++;
+                }
+                while (hasNextPage);
+
+                response = new ItemResponse<ShopifyTagBackfillResult>
+                {
+                    Item = result
+                };
+            }
+            catch (Exception ex)
+            {
+                code = 500;
+                response = new ErrorResponse(ex.Message);
+                Logger.LogError(ex, "Shopify managed-tag backfill failed.");
+            }
+
+            return StatusCode(code, response);
+        }
+
         [HttpPost("{id:int}/shopify/unpublish")]
         [Authorize(Policy = "AdminAction")]
         public async Task<ActionResult<ItemResponse<ShopifyProductPublishResult>>> UnpublishShopifyProduct(int id)
@@ -558,8 +641,16 @@ namespace Site_2024.Web.Api.Controllers
                     ShopifySyncSucceeded = false
                 };
 
-                // Quantity and shipping-policy changes are automatically pushed to Shopify.
-                if (model.Quantity.HasValue || model.ShippingPolicyId.HasValue)
+                // Product-facing changes are automatically pushed to Shopify.
+                // Condition changes are especially important because they change
+                // the managed tags used by automated discount collections.
+                bool shouldSyncProductDetails =
+                    model.Quantity.HasValue ||
+                    model.Price.HasValue ||
+                    model.Description != null ||
+                    model.ConditionId.HasValue;
+
+                if (shouldSyncProductDetails || model.ShippingPolicyId.HasValue)
                 {
                     Part updatedPart = _service.GetPartById(id);
 
@@ -597,7 +688,7 @@ namespace Site_2024.Web.Api.Controllers
 
                             ShopifyProductInventorySyncResult? shopifyResult = null;
 
-                            if (model.Quantity.HasValue &&
+                            if (shouldSyncProductDetails &&
                                 hasCompleteShopifyMapping)
                             {
                                 shopifyResult = await _shopifyAdminService
