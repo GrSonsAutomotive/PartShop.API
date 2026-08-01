@@ -1,4 +1,5 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
+using System.Collections.Generic;
 
 namespace Site_2024.Web.Api.Requests
 {
@@ -21,6 +22,15 @@ namespace Site_2024.Web.Api.Requests
             get => CatagoryId;
             set => CatagoryId = value;
         }
+
+
+        // Multi-select customer filters. ASP.NET Core binds repeated query
+        // parameters such as ?categoryIds=12&categoryIds=13 into these lists.
+        [FromQuery(Name = "categoryIds")]
+        public List<int> CategoryIds { get; set; } = new();
+
+        [FromQuery(Name = "conditionIds")]
+        public List<int> ConditionIds { get; set; } = new();
 
         public int? MakeId { get; set; }
         public int? ModelId { get; set; }

@@ -345,6 +345,33 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@q", (object?)model.q ?? DBNull.Value);
                     col.AddWithValue("@CatagoryId", (object?)model.CatagoryId ?? DBNull.Value);
+
+                    string categoryIdsCsv = string.Join(
+                        ",",
+                        (model.CategoryIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct()
+                            .OrderBy(id => id));
+
+                    string conditionIdsCsv = string.Join(
+                        ",",
+                        (model.ConditionIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct()
+                            .OrderBy(id => id));
+
+                    col.AddWithValue(
+                        "@CategoryIdsCsv",
+                        string.IsNullOrWhiteSpace(categoryIdsCsv)
+                            ? (object)DBNull.Value
+                            : categoryIdsCsv);
+
+                    col.AddWithValue(
+                        "@ConditionIdsCsv",
+                        string.IsNullOrWhiteSpace(conditionIdsCsv)
+                            ? (object)DBNull.Value
+                            : conditionIdsCsv);
+
                     col.AddWithValue("@MakeId", (object?)model.MakeId ?? DBNull.Value);
                     col.AddWithValue("@ModelId", (object?)model.ModelId ?? DBNull.Value);
                     col.AddWithValue("@Year", (object?)model.Year ?? DBNull.Value);
@@ -379,6 +406,33 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@q", (object?)model.q ?? DBNull.Value);
                     col.AddWithValue("@CatagoryId", (object?)model.CatagoryId ?? DBNull.Value);
+
+                    string categoryIdsCsv = string.Join(
+                        ",",
+                        (model.CategoryIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct()
+                            .OrderBy(id => id));
+
+                    string conditionIdsCsv = string.Join(
+                        ",",
+                        (model.ConditionIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct()
+                            .OrderBy(id => id));
+
+                    col.AddWithValue(
+                        "@CategoryIdsCsv",
+                        string.IsNullOrWhiteSpace(categoryIdsCsv)
+                            ? (object)DBNull.Value
+                            : categoryIdsCsv);
+
+                    col.AddWithValue(
+                        "@ConditionIdsCsv",
+                        string.IsNullOrWhiteSpace(conditionIdsCsv)
+                            ? (object)DBNull.Value
+                            : conditionIdsCsv);
+
                     col.AddWithValue("@MakeId", (object?)model.MakeId ?? DBNull.Value);
                     col.AddWithValue("@ModelId", (object?)model.ModelId ?? DBNull.Value);
                     col.AddWithValue("@Year", (object?)model.Year ?? DBNull.Value);
