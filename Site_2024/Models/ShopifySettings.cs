@@ -13,5 +13,6 @@ namespace Site_2024.Web.Api.Models
         public string DefaultLocationGid { get; set; } = string.Empty;
         public string OnlineStorePublicationGid { get; set; } = string.Empty;
         public string PublicApiBaseUrl { get; set; } = string.Empty;
+        public DateTimeOffset? ProductionCutoverUtc { get; set; }
     }
 }

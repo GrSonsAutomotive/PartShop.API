@@ -345,33 +345,6 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@q", (object?)model.q ?? DBNull.Value);
                     col.AddWithValue("@CatagoryId", (object?)model.CatagoryId ?? DBNull.Value);
-
-                    string categoryIdsCsv = string.Join(
-                        ",",
-                        (model.CategoryIds ?? new List<int>())
-                            .Where(id => id > 0)
-                            .Distinct()
-                            .OrderBy(id => id));
-
-                    string conditionIdsCsv = string.Join(
-                        ",",
-                        (model.ConditionIds ?? new List<int>())
-                            .Where(id => id > 0)
-                            .Distinct()
-                            .OrderBy(id => id));
-
-                    col.AddWithValue(
-                        "@CategoryIdsCsv",
-                        string.IsNullOrWhiteSpace(categoryIdsCsv)
-                            ? (object)DBNull.Value
-                            : categoryIdsCsv);
-
-                    col.AddWithValue(
-                        "@ConditionIdsCsv",
-                        string.IsNullOrWhiteSpace(conditionIdsCsv)
-                            ? (object)DBNull.Value
-                            : conditionIdsCsv);
-
                     col.AddWithValue("@MakeId", (object?)model.MakeId ?? DBNull.Value);
                     col.AddWithValue("@ModelId", (object?)model.ModelId ?? DBNull.Value);
                     col.AddWithValue("@Year", (object?)model.Year ?? DBNull.Value);
@@ -406,33 +379,6 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@q", (object?)model.q ?? DBNull.Value);
                     col.AddWithValue("@CatagoryId", (object?)model.CatagoryId ?? DBNull.Value);
-
-                    string categoryIdsCsv = string.Join(
-                        ",",
-                        (model.CategoryIds ?? new List<int>())
-                            .Where(id => id > 0)
-                            .Distinct()
-                            .OrderBy(id => id));
-
-                    string conditionIdsCsv = string.Join(
-                        ",",
-                        (model.ConditionIds ?? new List<int>())
-                            .Where(id => id > 0)
-                            .Distinct()
-                            .OrderBy(id => id));
-
-                    col.AddWithValue(
-                        "@CategoryIdsCsv",
-                        string.IsNullOrWhiteSpace(categoryIdsCsv)
-                            ? (object)DBNull.Value
-                            : categoryIdsCsv);
-
-                    col.AddWithValue(
-                        "@ConditionIdsCsv",
-                        string.IsNullOrWhiteSpace(conditionIdsCsv)
-                            ? (object)DBNull.Value
-                            : conditionIdsCsv);
-
                     col.AddWithValue("@MakeId", (object?)model.MakeId ?? DBNull.Value);
                     col.AddWithValue("@ModelId", (object?)model.ModelId ?? DBNull.Value);
                     col.AddWithValue("@Year", (object?)model.Year ?? DBNull.Value);
@@ -840,8 +786,8 @@ namespace Site_2024.Web.Api.Services
             fitment.Company = reader.GetSafeString(startingIndex++);
             fitment.ModelId = reader.GetSafeInt32(startingIndex++);
             fitment.ModelName = reader.GetSafeString(startingIndex++);
-            fitment.YearStart = reader.GetSafeInt32(startingIndex++);
-            fitment.YearEnd = reader.GetSafeInt32(startingIndex++);
+            fitment.YearStart = reader.GetSafeInt32Nullable(startingIndex++);
+            fitment.YearEnd = reader.GetSafeInt32Nullable(startingIndex++);
 
             return fitment;
         }
@@ -884,8 +830,8 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@PartId", partId);
                     col.AddWithValue("@MakeId", fitment.MakeId);
-                    col.AddWithValue("@YearStart", fitment.YearStart);
-                    col.AddWithValue("@YearEnd", fitment.YearEnd);
+                    col.AddWithValue("@YearStart", (object?)fitment.YearStart ?? DBNull.Value);
+                    col.AddWithValue("@YearEnd", (object?)fitment.YearEnd ?? DBNull.Value);
 
                     SqlParameter idOut = new SqlParameter("@Id", SqlDbType.Int);
                     idOut.Direction = ParameterDirection.Output;
@@ -932,11 +878,16 @@ namespace Site_2024.Web.Api.Services
             return false;
         }
 
-        private static string FormatYearRange(int yearStart, int yearEnd)
+        private static string? FormatYearRange(int? yearStart, int? yearEnd)
         {
-            return yearStart == yearEnd
-                ? yearStart.ToString()
-                : $"{yearStart} - {yearEnd}";
+            if (!yearStart.HasValue || !yearEnd.HasValue)
+            {
+                return null;
+            }
+
+            return yearStart.Value == yearEnd.Value
+                ? yearStart.Value.ToString()
+                : $"{yearStart.Value} - {yearEnd.Value}";
         }
 
         private static void NormalizeLegacyFields(PartAddRequest model)
@@ -955,20 +906,26 @@ namespace Site_2024.Web.Api.Services
 
             if ((model.Fitments == null || model.Fitments.Count == 0) && model.MakeId > 0)
             {
-                if (TryParseYearRange(model.Year, out int yearStart, out int yearEnd))
-                {
-                    model.Fitments = new List<PartFitmentAddRequest>
-                    {
-                        new PartFitmentAddRequest
-                        {
-                            MakeId = model.MakeId,
-                            YearStart = yearStart,
-                            YearEnd = yearEnd
-                        }
-                    };
+                int? yearStart = null;
+                int? yearEnd = null;
 
-                    model.Year = FormatYearRange(yearStart, yearEnd);
+                if (TryParseYearRange(model.Year, out int parsedYearStart, out int parsedYearEnd))
+                {
+                    yearStart = parsedYearStart;
+                    yearEnd = parsedYearEnd;
                 }
+
+                model.Fitments = new List<PartFitmentAddRequest>
+                {
+                    new PartFitmentAddRequest
+                    {
+                        MakeId = model.MakeId,
+                        YearStart = yearStart,
+                        YearEnd = yearEnd
+                    }
+                };
+
+                model.Year = FormatYearRange(yearStart, yearEnd);
             }
             else if (model.Fitments != null && model.Fitments.Count > 0)
             {

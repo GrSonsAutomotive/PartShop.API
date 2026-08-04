@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 
@@ -5,6 +6,7 @@ namespace Site_2024.Models.Requests.RefundRequests
 {
     public class RefundRequestAddRequest
     {
+        public Guid? ClientSubmissionId { get; set; }
         [Range(1, int.MaxValue)]
         public int? PartId { get; set; }
 

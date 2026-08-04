@@ -471,6 +471,14 @@ namespace Site_2024.Web.Api.Controllers
                     ?? throw new InvalidOperationException(
                         "No final refund exists for this return request.");
 
+                if (string.Equals(
+                    finalization.CompletionEmailStatus,
+                    "Sent",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return OkFinalization(finalization);
+                }
+
                 if (!finalization.ShopifySucceededAt.HasValue
                     || (!string.Equals(
                             finalization.InventoryStatus,
@@ -898,6 +906,14 @@ namespace Site_2024.Web.Api.Controllers
             RefundFinalization finalization,
             int userId)
         {
+            if (string.Equals(
+                finalization.CompletionEmailStatus,
+                "Sent",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
             try
             {
                 _emailService.SendReturnCompletionEmail(

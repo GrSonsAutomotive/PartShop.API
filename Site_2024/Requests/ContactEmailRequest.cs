@@ -1,9 +1,12 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System;
+using System.ComponentModel.DataAnnotations;
 
 namespace Site_2024.Web.Api.Requests
 {
     public class ContactEmailRequest
     {
+        [Required]
+        public Guid? ClientSubmissionId { get; set; }
         [Required]
         [StringLength(50)]
         public string InquiryType { get; set; }

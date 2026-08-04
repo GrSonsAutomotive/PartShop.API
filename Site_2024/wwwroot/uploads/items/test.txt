@@ -1,6 +1,0 @@
-﻿namespace Site_2024.Web.Api.wwwroot.uploads.items
-{
-    public class test
-    {
-    }
-}

@@ -22,7 +22,12 @@ namespace Site_2024.Web.Api.Services
             _webHostEnvironment = webHostEnvironment;
         }
 
-        public void SendContactEmail(ContactEmailRequest model, Part part, string requestOrigin)
+        public string GetContactRecipientEmail(string inquiryType)
+        {
+            return GetRecipientEmail(inquiryType);
+        }
+
+        public void SendContactEmail(ContactEmailRequest model, Part? part, string requestOrigin)
         {
             string recipientEmail = GetRecipientEmail(model.InquiryType);
             string siteBaseUrl = ResolveSiteBaseUrl(requestOrigin);
@@ -43,15 +48,90 @@ namespace Site_2024.Web.Api.Services
             mail.Body = BuildBody(model, part, siteBaseUrl);
             mail.IsBodyHtml = false;
 
-            using SmtpClient client = new SmtpClient(_settings.SmtpHost, _settings.SmtpPort);
+            Send(mail);
+        }
 
-            client.EnableSsl = _settings.EnableSsl;
-            client.Credentials = new NetworkCredential(
-                _settings.SmtpUsername,
-                _settings.SmtpPassword
-            );
+        public void SendContactConfirmationEmail(
+            ContactEmailRequest model,
+            Part? part,
+            string requestOrigin)
+        {
+            if (model == null)
+            {
+                throw new ArgumentNullException(nameof(model));
+            }
 
-            client.Send(mail);
+            string siteBaseUrl = ResolveSiteBaseUrl(requestOrigin);
+
+            using MailMessage mail = CreateCustomerMessage(model.Email);
+            mail.ReplyToList.Add(
+                new MailAddress(GetRecipientEmail(model.InquiryType)));
+            mail.Subject = $"We Received Your Message - {model.Subject}";
+            mail.Body = BuildContactConfirmationBody(model, part, siteBaseUrl);
+            mail.IsBodyHtml = false;
+
+            Send(mail);
+        }
+
+        public void SendReturnSubmissionBusinessEmail(RefundRequest model)
+        {
+            ValidateReturnCustomerEmail(model);
+
+            if (string.IsNullOrWhiteSpace(_settings.ReturnsEmail))
+            {
+                throw new InvalidOperationException(
+                    "The return notification mailbox is not configured.");
+            }
+
+            using MailMessage mail = CreateBusinessMessage();
+            mail.To.Add(new MailAddress(_settings.ReturnsEmail.Trim()));
+            mail.ReplyToList.Add(new MailAddress(model.CustomerEmail!.Trim()));
+            mail.Subject = BuildReturnSubmissionBusinessSubject(model);
+            mail.Body = BuildReturnSubmissionBusinessBody(model);
+            mail.IsBodyHtml = false;
+
+            Send(mail);
+        }
+
+        public void SendReturnSubmissionCustomerEmail(RefundRequest model)
+        {
+            ValidateReturnCustomerEmail(model);
+
+            using MailMessage mail = CreateCustomerMessage(model.CustomerEmail!);
+            AddReturnsReplyTo(mail);
+            mail.Subject = BuildReturnSubmissionCustomerSubject(model);
+            mail.Body = BuildReturnSubmissionCustomerBody(model);
+            mail.IsBodyHtml = false;
+
+            Send(mail);
+        }
+
+        public void SendReturnStatusEmail(RefundRequest model)
+        {
+            ValidateReturnCustomerEmail(model);
+
+            string status =
+                (model.Status ?? model.StatusName ?? string.Empty).Trim();
+
+            if (string.IsNullOrWhiteSpace(status))
+            {
+                throw new InvalidOperationException(
+                    "The return request does not contain a status.");
+            }
+
+            using MailMessage mail = CreateCustomerMessage(model.CustomerEmail!);
+            AddReturnsReplyTo(mail);
+            AddInternalCopy(mail, model.CustomerEmail);
+
+            string orderReference = string.IsNullOrWhiteSpace(model.OrderNumber)
+                ? $"Return Request #{model.Id}"
+                : $"Order {model.OrderNumber}";
+
+            mail.Subject = $"Return Status: {status} - {orderReference}";
+            mail.Body = BuildReturnStatusBody(model, status);
+            mail.IsBodyHtml = false;
+
+            Send(mail);
         }
 
         public void SendReturnDecisionEmail(RefundRequest model)
@@ -104,19 +184,13 @@ namespace Site_2024.Web.Api.Services
                         "GR&Sons Returns"));
             }
 
+            AddInternalCopy(mail, model.CustomerEmail);
+
             mail.Subject = BuildReturnDecisionSubject(model, isApproved);
             mail.Body = BuildReturnDecisionBody(model, isApproved);
             mail.IsBodyHtml = false;
 
-            using SmtpClient client =
-                new SmtpClient(_settings.SmtpHost, _settings.SmtpPort);
-
-            client.EnableSsl = _settings.EnableSsl;
-            client.Credentials = new NetworkCredential(
-                _settings.SmtpUsername,
-                _settings.SmtpPassword);
-
-            client.Send(mail);
+            Send(mail);
         }
 
         public void SendReturnLabelEmail(RefundRequest model)
@@ -196,6 +270,8 @@ namespace Site_2024.Web.Api.Services
                         "GR&Sons Returns"));
             }
 
+            AddInternalCopy(mail, model.CustomerEmail);
+
             string orderReference = string.IsNullOrWhiteSpace(model.OrderNumber)
                 ? $"Request #{model.Id}"
                 : $"Order {model.OrderNumber}";
@@ -216,15 +292,7 @@ namespace Site_2024.Web.Api.Services
             labelAttachment.Name = attachmentName;
             mail.Attachments.Add(labelAttachment);
 
-            using SmtpClient client =
-                new SmtpClient(_settings.SmtpHost, _settings.SmtpPort);
-
-            client.EnableSsl = _settings.EnableSsl;
-            client.Credentials = new NetworkCredential(
-                _settings.SmtpUsername,
-                _settings.SmtpPassword);
-
-            client.Send(mail);
+            Send(mail);
         }
 
         public void SendReturnCompletionEmail(
@@ -285,6 +353,8 @@ namespace Site_2024.Web.Api.Services
                         "GR&Sons Returns"));
             }
 
+            AddInternalCopy(mail, model.CustomerEmail);
+
             string orderReference = string.IsNullOrWhiteSpace(model.OrderNumber)
                 ? $"Return Request #{model.Id}"
                 : $"Order {model.OrderNumber}";
@@ -293,15 +363,7 @@ namespace Site_2024.Web.Api.Services
             mail.Body = BuildReturnCompletionBody(model, finalization);
             mail.IsBodyHtml = false;
 
-            using SmtpClient client =
-                new SmtpClient(_settings.SmtpHost, _settings.SmtpPort);
-
-            client.EnableSsl = _settings.EnableSsl;
-            client.Credentials = new NetworkCredential(
-                _settings.SmtpUsername,
-                _settings.SmtpPassword);
-
-            client.Send(mail);
+            Send(mail);
         }
 
         private static string BuildReturnCompletionBody(
@@ -390,6 +452,222 @@ namespace Site_2024.Web.Api.Services
             sb.AppendLine(
                 "Please reply to this email if you have questions about the completed refund.");
 
+            return sb.ToString();
+        }
+
+        private MailMessage CreateBusinessMessage()
+        {
+            MailMessage mail = new MailMessage();
+            mail.From = new MailAddress(
+                _settings.FromEmail,
+                string.IsNullOrWhiteSpace(_settings.FromDisplayName)
+                    ? "GR & Sons Automotive Parts"
+                    : _settings.FromDisplayName);
+            return mail;
+        }
+
+        private MailMessage CreateCustomerMessage(string recipient)
+        {
+            if (string.IsNullOrWhiteSpace(recipient))
+            {
+                throw new InvalidOperationException(
+                    "A customer email address is required.");
+            }
+
+            MailMessage mail = CreateBusinessMessage();
+            mail.To.Add(new MailAddress(recipient.Trim()));
+            return mail;
+        }
+
+        private void AddReturnsReplyTo(MailMessage mail)
+        {
+            if (!string.IsNullOrWhiteSpace(_settings.ReturnsEmail))
+            {
+                mail.ReplyToList.Add(
+                    new MailAddress(
+                        _settings.ReturnsEmail.Trim(),
+                        "GR & Sons Returns"));
+            }
+        }
+
+        private void AddInternalCopy(
+            MailMessage mail,
+            string? primaryRecipient)
+        {
+            if (string.IsNullOrWhiteSpace(_settings.ReturnsEmail)
+                || string.Equals(
+                    _settings.ReturnsEmail.Trim(),
+                    primaryRecipient?.Trim(),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            mail.Bcc.Add(new MailAddress(_settings.ReturnsEmail.Trim()));
+        }
+
+        private void Send(MailMessage mail)
+        {
+            if (string.IsNullOrWhiteSpace(_settings.SmtpHost)
+                || _settings.SmtpPort <= 0
+                || string.IsNullOrWhiteSpace(_settings.SmtpUsername)
+                || string.IsNullOrWhiteSpace(_settings.SmtpPassword)
+                || string.IsNullOrWhiteSpace(_settings.FromEmail))
+            {
+                throw new InvalidOperationException(
+                    "Production email delivery is not fully configured.");
+            }
+
+            using SmtpClient client =
+                new SmtpClient(_settings.SmtpHost, _settings.SmtpPort);
+
+            client.EnableSsl = _settings.EnableSsl;
+            client.Credentials = new NetworkCredential(
+                _settings.SmtpUsername,
+                _settings.SmtpPassword);
+            client.Send(mail);
+        }
+
+        private static void ValidateReturnCustomerEmail(RefundRequest model)
+        {
+            if (model == null)
+            {
+                throw new ArgumentNullException(nameof(model));
+            }
+
+            if (string.IsNullOrWhiteSpace(model.CustomerEmail))
+            {
+                throw new InvalidOperationException(
+                    "The return request does not contain a customer email address.");
+            }
+        }
+
+        private static string BuildContactConfirmationBody(
+            ContactEmailRequest model,
+            Part? part,
+            string siteBaseUrl)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine($"Hello {DisplayValue(model.Name)},");
+            sb.AppendLine();
+            sb.AppendLine(
+                "We received your message and routed it to the appropriate GR & Sons team member.");
+            sb.AppendLine();
+            sb.AppendLine($"Subject: {model.Subject}");
+            sb.AppendLine($"Inquiry type: {model.InquiryType}");
+
+            if (part != null)
+            {
+                sb.AppendLine($"Part: {part.Name}");
+                sb.AppendLine($"Part ID: {part.Id}");
+                string partUrl = BuildSiteUrl(
+                    siteBaseUrl,
+                    $"/browse/part/{part.Id}");
+                sb.AppendLine($"Part page: {partUrl}");
+            }
+
+            sb.AppendLine();
+            sb.AppendLine("Your message");
+            sb.AppendLine("----------------------------------------");
+            sb.AppendLine(model.Message);
+            sb.AppendLine();
+            sb.AppendLine(
+                "Reply to this email if you need to add information before we respond.");
+
+            return sb.ToString();
+        }
+
+        private static string BuildReturnSubmissionBusinessSubject(
+            RefundRequest model)
+        {
+            return $"New Return Request #{model.Id} - {DisplayValue(model.OrderNumber)}";
+        }
+
+        private static string BuildReturnSubmissionBusinessBody(
+            RefundRequest model)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("A new customer return request was submitted.");
+            sb.AppendLine();
+            sb.AppendLine($"Return Request: #{model.Id}");
+            sb.AppendLine($"Order Number: {DisplayValue(model.OrderNumber)}");
+            sb.AppendLine($"Customer Email: {DisplayValue(model.CustomerEmail)}");
+            sb.AppendLine($"Requested Part: {DisplayValue(model.RequestedPartName)}");
+            sb.AppendLine($"Requested Quantity: {model.RequestedQuantity ?? 1}");
+            sb.AppendLine($"Reason: {DisplayValue(model.ReturnReasonName ?? model.Reason)}");
+            sb.AppendLine($"Proof Photos: {model.PhotoCount}");
+            sb.AppendLine();
+            sb.AppendLine("Customer Notes");
+            sb.AppendLine("----------------------------------------");
+            sb.AppendLine(DisplayValue(model.Notes));
+            sb.AppendLine();
+            sb.AppendLine(
+                "Open the Admin Returns page to verify the order and review the request.");
+            return sb.ToString();
+        }
+
+        private static string BuildReturnSubmissionCustomerSubject(
+            RefundRequest model)
+        {
+            return $"Return Request Received - Reference #{model.Id}";
+        }
+
+        private static string BuildReturnSubmissionCustomerBody(
+            RefundRequest model)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("We received your return request.");
+            sb.AppendLine();
+            sb.AppendLine($"Reference ID: {model.Id}");
+            sb.AppendLine($"Order Number: {DisplayValue(model.OrderNumber)}");
+            sb.AppendLine($"Requested Part: {DisplayValue(model.RequestedPartName)}");
+            sb.AppendLine($"Requested Quantity: {model.RequestedQuantity ?? 1}");
+            sb.AppendLine($"Reason: {DisplayValue(model.ReturnReasonName ?? model.Reason)}");
+            sb.AppendLine();
+            sb.AppendLine(
+                "An administrator must review every request. This message does not mean the return or refund has been approved.");
+            sb.AppendLine(
+                "You will receive another email whenever the request status changes.");
+            sb.AppendLine();
+            sb.AppendLine(
+                "Reply to this email if you need to provide additional information.");
+            return sb.ToString();
+        }
+
+        private static string BuildReturnStatusBody(
+            RefundRequest model,
+            string status)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine($"Your return request status is now: {status}.");
+            sb.AppendLine();
+            sb.AppendLine($"Return Request: #{model.Id}");
+            sb.AppendLine($"Order Number: {DisplayValue(model.OrderNumber)}");
+            sb.AppendLine($"Requested Part: {DisplayValue(model.RequestedPartName)}");
+
+            if (!string.IsNullOrWhiteSpace(model.CustomerInstructions))
+            {
+                sb.AppendLine();
+                sb.AppendLine("Customer Instructions");
+                sb.AppendLine("----------------------------------------");
+                sb.AppendLine(model.CustomerInstructions.Trim());
+            }
+
+            if (string.Equals(
+                status,
+                "Denied",
+                StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(model.DenialReason))
+            {
+                sb.AppendLine();
+                sb.AppendLine("Reason");
+                sb.AppendLine("----------------------------------------");
+                sb.AppendLine(model.DenialReason.Trim());
+            }
+
+            sb.AppendLine();
+            sb.AppendLine(
+                "Reply to this email if you have questions about the status of your return.");
             return sb.ToString();
         }
 

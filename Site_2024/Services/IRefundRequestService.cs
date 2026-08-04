@@ -9,6 +9,7 @@ namespace Site_2024.Web.Api.Services
     public interface IRefundRequestService
     {
         int Add(RefundRequestAddRequest model, int? userId);
+        RefundRequestCreateResult AddWithResult(RefundRequestAddRequest model, int? userId);
         RefundRequest? GetById(int id);
         Paged<RefundRequest>? GetPaginated(int pageIndex, int pageSize, RefundRequestSearchRequest model);
         List<ReturnReason> GetReasons();
@@ -70,7 +71,7 @@ namespace Site_2024.Web.Api.Services
             RefundRequestCompleteInspectionRequest model,
             int userId);
 
-        void UpdateStatus(
+        bool UpdateStatus(
             int id,
             RefundRequestUpdateStatusRequest model,
             int userId);

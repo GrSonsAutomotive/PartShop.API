@@ -17,7 +17,7 @@ namespace Site_2024.Web.Api.Requests
         public int ShippingPolicyId { get; set; }
 
         [StringLength(50)]
-        public string Year { get; set; } // legacy
+        public string? Year { get; set; } // legacy / optional
 
         [Required, StringLength(128, MinimumLength = 2)]
         public string PartNumber { get; set; }
