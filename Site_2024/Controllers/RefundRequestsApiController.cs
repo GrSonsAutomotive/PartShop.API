@@ -29,6 +29,7 @@ namespace Site_2024.Web.Api.Controllers
         private readonly IAuthenticationService<IUserAuthData> _authService;
         private readonly IWebHostEnvironment _webHostEnvironment;
         private readonly ISmtpEmailService _emailService;
+        private readonly IEmailDeliveryLogService _emailDeliveryLogService;
 
         public RefundRequestsApiController(
             IRefundRequestService service,
@@ -36,6 +37,7 @@ namespace Site_2024.Web.Api.Controllers
             IAuthenticationService<IUserAuthData> authService,
             IWebHostEnvironment webHostEnvironment,
             ISmtpEmailService emailService,
+            IEmailDeliveryLogService emailDeliveryLogService,
             ILogger<RefundRequestsApiController> logger)
             : base(logger)
         {
@@ -44,6 +46,7 @@ namespace Site_2024.Web.Api.Controllers
             _authService = authService;
             _webHostEnvironment = webHostEnvironment;
             _emailService = emailService;
+            _emailDeliveryLogService = emailDeliveryLogService;
         }
 
         [HttpGet("reasons")]
@@ -123,7 +126,8 @@ namespace Site_2024.Web.Api.Controllers
         [HttpPost("customer-submit")]
         [AllowAnonymous]
         [Consumes("multipart/form-data")]
-        public ActionResult<ItemResponse<int>> CustomerSubmit([FromForm] RefundRequestCustomerSubmitRequest model)
+        public ActionResult<ItemResponse<int>> CustomerSubmit(
+            [FromForm] RefundRequestCustomerSubmitRequest model)
         {
             int code = 201;
             BaseResponse response = null;
@@ -132,58 +136,87 @@ namespace Site_2024.Web.Api.Controllers
             {
                 if (model == null)
                 {
-                    code = 400;
-                    return StatusCode(code, new ErrorResponse("Return request payload is required."));
+                    return BadRequest(
+                        new ErrorResponse(
+                            "Return request payload is required."));
+                }
+
+                if (model.ClientSubmissionId == null
+                    || model.ClientSubmissionId == Guid.Empty)
+                {
+                    return BadRequest(
+                        new ErrorResponse(
+                            "A valid return submission id is required."));
                 }
 
                 List<ReturnReason> reasons = _service.GetReasons();
-                ReturnReason selectedReason = reasons.FirstOrDefault(r => r.Id == model.ReturnReasonId);
+                ReturnReason selectedReason = reasons.FirstOrDefault(
+                    r => r.Id == model.ReturnReasonId);
 
                 if (selectedReason == null)
                 {
-                    code = 400;
-                    return StatusCode(code, new ErrorResponse("Please select a valid return reason."));
+                    return BadRequest(
+                        new ErrorResponse(
+                            "Please select a valid return reason."));
                 }
 
-                if (selectedReason.RequiresNotes && string.IsNullOrWhiteSpace(model.Notes))
+                if (selectedReason.RequiresNotes
+                    && string.IsNullOrWhiteSpace(model.Notes))
                 {
-                    code = 400;
-                    return StatusCode(code, new ErrorResponse("This return reason requires a written description."));
+                    return BadRequest(
+                        new ErrorResponse(
+                            "This return reason requires a written description."));
                 }
 
-                if (selectedReason.RequiresPhotos && (model.Photos == null || model.Photos.Count == 0))
+                if (selectedReason.RequiresPhotos
+                    && (model.Photos == null
+                        || model.Photos.Count == 0))
                 {
-                    code = 400;
-                    return StatusCode(code, new ErrorResponse("This return reason requires at least one proof photo."));
+                    return BadRequest(
+                        new ErrorResponse(
+                            "This return reason requires at least one proof photo."));
                 }
 
-                RefundRequestAddRequest addRequest = new RefundRequestAddRequest
+                RefundRequestAddRequest addRequest =
+                    new RefundRequestAddRequest
+                    {
+                        ClientSubmissionId = model.ClientSubmissionId,
+                        PartId = null,
+                        ShopifyOrderId = null,
+                        OrderNumber = model.OrderNumber,
+                        CustomerEmail = model.CustomerEmail,
+                        RequestedPartName = model.RequestedPartName,
+                        RequestedQuantity = model.RequestedQuantity,
+                        ReturnReasonId = model.ReturnReasonId,
+                        Reason = selectedReason.Name
+                            ?? "Customer Return Request",
+                        Notes = model.Notes,
+                        Items = new List<RefundRequestItemAddRequest>()
+                    };
+
+                RefundRequestCreateResult createResult =
+                    _service.AddWithResult(addRequest, null);
+
+                if (createResult.WasCreated
+                    && model.Photos != null
+                    && model.Photos.Count > 0)
                 {
-                    PartId = null,
-                    ShopifyOrderId = null,
-                    OrderNumber = model.OrderNumber,
-                    CustomerEmail = model.CustomerEmail,
-                    RequestedPartName = model.RequestedPartName,
-                    RequestedQuantity = model.RequestedQuantity,
-                    ReturnReasonId = model.ReturnReasonId,
-                    Reason = selectedReason.Name ?? "Customer Return Request",
-                    Notes = model.Notes,
-                    Items = new List<RefundRequestItemAddRequest>()
+                    SaveCustomerPhotos(
+                        createResult.Id,
+                        model.Photos);
+                }
+
+                RefundRequest refundRequest =
+                    _service.GetById(createResult.Id)
+                    ?? throw new InvalidOperationException(
+                        "The saved return request could not be reloaded.");
+
+                TrySendSubmissionEmails(refundRequest);
+
+                response = new ItemResponse<int>
+                {
+                    Item = createResult.Id
                 };
-
-                int id = _service.Add(addRequest, null);
-
-                if (model.Photos != null && model.Photos.Count > 0)
-                {
-                    SaveCustomerPhotos(id, model.Photos);
-                }
-
-                if (id <= 0)
-                {
-                    throw new Exception($"Refund request insert failed. Returned Id was {id}.");
-                }
-
-                response = new ItemResponse<int> { Item = id };
             }
             catch (InvalidOperationException ex)
             {
@@ -703,8 +736,7 @@ namespace Site_2024.Web.Api.Controllers
 
                 if (refundRequest == null)
                 {
-                    return StatusCode(
-                        404,
+                    return NotFound(
                         new ErrorResponse(
                             "Refund request not found."));
                 }
@@ -727,43 +759,13 @@ namespace Site_2024.Web.Api.Controllers
                         "Decision emails can only be sent for Approved or Denied requests.");
                 }
 
-                try
-                {
-                    _emailService.SendReturnDecisionEmail(
-                        refundRequest);
-
-                    _service.MarkDecisionEmailResult(
-                        id,
-                        true,
-                        null);
-                }
-                catch (Exception emailException)
-                {
-                    _service.MarkDecisionEmailResult(
-                        id,
-                        false,
-                        emailException.Message);
-
-                    Logger.LogError(
-                        emailException,
-                        "Return decision email failed for refund request {RefundRequestId}.",
-                        id);
-
-                    code = 500;
-                    response = new ErrorResponse(
-                        "The decision remains saved, but the customer email could not be sent. Review the email status and try again.");
-
-                    return StatusCode(code, response);
-                }
-
                 RefundRequest refreshed =
-                    _service.GetById(id);
+                    TrySendDecisionEmail(refundRequest);
 
-                response =
-                    new ItemResponse<RefundRequest>
-                    {
-                        Item = refreshed
-                    };
+                response = new ItemResponse<RefundRequest>
+                {
+                    Item = refreshed
+                };
             }
             catch (InvalidOperationException ex)
             {
@@ -775,7 +777,6 @@ namespace Site_2024.Web.Api.Controllers
                 code = 500;
                 response = new ErrorResponse(
                     "Unable to send the return decision email.");
-
                 Logger.LogError(ex.ToString());
             }
 
@@ -962,33 +963,12 @@ namespace Site_2024.Web.Api.Controllers
                 RefundRequest refundRequest = _service.GetById(id);
                 ValidateApprovedReturn(refundRequest);
 
-                try
-                {
-                    _emailService.SendReturnLabelEmail(refundRequest!);
-                    _service.MarkReturnLabelEmailResult(id, true, null);
-                }
-                catch (Exception emailException)
-                {
-                    _service.MarkReturnLabelEmailResult(
-                        id,
-                        false,
-                        emailException.Message);
-
-                    Logger.LogError(
-                        emailException,
-                        "Return label email failed for refund request {RefundRequestId}.",
-                        id);
-
-                    code = 500;
-                    response = new ErrorResponse(
-                        "The label remains saved, but the customer email could not be sent. Review the label email status and try again.");
-
-                    return StatusCode(code, response);
-                }
+                RefundRequest refreshed =
+                    TrySendReturnLabelEmail(refundRequest!);
 
                 response = new ItemResponse<RefundRequest>
                 {
-                    Item = _service.GetById(id)
+                    Item = refreshed
                 };
             }
             catch (InvalidOperationException ex)
@@ -1254,22 +1234,41 @@ namespace Site_2024.Web.Api.Controllers
 
         [HttpPatch("{id:int}/status")]
         [Authorize(Policy = "AdminAction")]
-        public ActionResult<SuccessResponse> UpdateStatus(int id, RefundRequestUpdateStatusRequest model)
+        public ActionResult<SuccessResponse> UpdateStatus(
+            int id,
+            RefundRequestUpdateStatusRequest model)
         {
             int code = 200;
             BaseResponse response = null;
 
             try
             {
-                var user = _authService.GetCurrentUser();
-                _service.UpdateStatus(id, model, user.Id);
+                IUserAuthData user = _authService.GetCurrentUser();
+                bool statusChanged =
+                    _service.UpdateStatus(id, model, user.Id);
+
+                if (statusChanged)
+                {
+                    RefundRequest refreshed =
+                        _service.GetById(id)
+                        ?? throw new InvalidOperationException(
+                            "The updated return request could not be reloaded.");
+
+                    TrySendStatusEmail(refreshed);
+                }
 
                 response = new SuccessResponse();
+            }
+            catch (InvalidOperationException ex)
+            {
+                code = 400;
+                response = new ErrorResponse(ex.Message);
             }
             catch (Exception ex)
             {
                 code = 500;
-                response = new ErrorResponse(ex.Message);
+                response = new ErrorResponse(
+                    "Unable to update the return status.");
                 Logger.LogError(ex.ToString());
             }
 
@@ -1279,16 +1278,35 @@ namespace Site_2024.Web.Api.Controllers
         private RefundRequest TrySendReturnLabelEmail(
             RefundRequest refundRequest)
         {
+            string labelVersion =
+                refundRequest.ReturnLabelCreatedAt?.Ticks.ToString()
+                ?? refundRequest.ReturnLabelFilePath
+                ?? "current";
+            string messageKey =
+                $"return-label:{refundRequest.Id}:{labelVersion}";
+
             try
             {
-                _emailService.SendReturnLabelEmail(refundRequest);
-                _service.MarkReturnLabelEmailResult(
+                bool shouldSend = _emailDeliveryLogService.TryBegin(
+                    messageKey,
+                    "ReturnLabel",
+                    "RefundRequest",
                     refundRequest.Id,
-                    true,
-                    null);
+                    refundRequest.CustomerEmail ?? string.Empty);
+
+                if (shouldSend)
+                {
+                    _emailService.SendReturnLabelEmail(refundRequest);
+                    _emailDeliveryLogService.MarkSent(messageKey);
+                    _service.MarkReturnLabelEmailResult(
+                        refundRequest.Id,
+                        true,
+                        null);
+                }
             }
             catch (Exception emailException)
             {
+                TryMarkEmailLogFailed(messageKey, emailException);
                 _service.MarkReturnLabelEmailResult(
                     refundRequest.Id,
                     false,
@@ -1582,18 +1600,35 @@ namespace Site_2024.Web.Api.Controllers
         private RefundRequest TrySendDecisionEmail(
             RefundRequest refundRequest)
         {
+            string status =
+                refundRequest.Status
+                ?? refundRequest.StatusName
+                ?? "Decision";
+            string messageKey =
+                $"return-decision:{refundRequest.Id}:{status.ToLowerInvariant()}";
+
             try
             {
-                _emailService.SendReturnDecisionEmail(
-                    refundRequest);
-
-                _service.MarkDecisionEmailResult(
+                bool shouldSend = _emailDeliveryLogService.TryBegin(
+                    messageKey,
+                    "ReturnDecision",
+                    "RefundRequest",
                     refundRequest.Id,
-                    true,
-                    null);
+                    refundRequest.CustomerEmail ?? string.Empty);
+
+                if (shouldSend)
+                {
+                    _emailService.SendReturnDecisionEmail(refundRequest);
+                    _emailDeliveryLogService.MarkSent(messageKey);
+                    _service.MarkDecisionEmailResult(
+                        refundRequest.Id,
+                        true,
+                        null);
+                }
             }
             catch (Exception emailException)
             {
+                TryMarkEmailLogFailed(messageKey, emailException);
                 _service.MarkDecisionEmailResult(
                     refundRequest.Id,
                     false,
@@ -1984,5 +2019,102 @@ namespace Site_2024.Web.Api.Controllers
                 });
             }
         }
+        private void TrySendSubmissionEmails(RefundRequest refundRequest)
+        {
+            string businessKey =
+                $"return-submitted-business:{refundRequest.Id}";
+            string customerKey =
+                $"return-submitted-customer:{refundRequest.Id}";
+
+            TrySendLoggedReturnEmail(
+                businessKey,
+                "ReturnSubmissionBusinessNotification",
+                refundRequest,
+                _emailService.GetContactRecipientEmail("returns"),
+                () => _emailService.SendReturnSubmissionBusinessEmail(
+                    refundRequest));
+
+            TrySendLoggedReturnEmail(
+                customerKey,
+                "ReturnSubmissionCustomerConfirmation",
+                refundRequest,
+                refundRequest.CustomerEmail ?? string.Empty,
+                () => _emailService.SendReturnSubmissionCustomerEmail(
+                    refundRequest));
+        }
+
+        private void TrySendStatusEmail(RefundRequest refundRequest)
+        {
+            string status =
+                refundRequest.Status
+                ?? refundRequest.StatusName
+                ?? "Unknown";
+            string version = refundRequest.DateModified.Ticks.ToString();
+            string messageKey =
+                $"return-status:{refundRequest.Id}:{status.ToLowerInvariant()}:{version}";
+
+            TrySendLoggedReturnEmail(
+                messageKey,
+                "ReturnStatusChange",
+                refundRequest,
+                refundRequest.CustomerEmail ?? string.Empty,
+                () => _emailService.SendReturnStatusEmail(refundRequest));
+        }
+
+        private void TrySendLoggedReturnEmail(
+            string messageKey,
+            string messageType,
+            RefundRequest refundRequest,
+            string recipient,
+            Action sendAction)
+        {
+            try
+            {
+                bool shouldSend = _emailDeliveryLogService.TryBegin(
+                    messageKey,
+                    messageType,
+                    "RefundRequest",
+                    refundRequest.Id,
+                    recipient);
+
+                if (!shouldSend)
+                {
+                    return;
+                }
+
+                sendAction();
+                _emailDeliveryLogService.MarkSent(messageKey);
+            }
+            catch (Exception emailException)
+            {
+                TryMarkEmailLogFailed(messageKey, emailException);
+                Logger.LogError(
+                    emailException,
+                    "{MessageType} email failed for refund request {RefundRequestId}.",
+                    messageType,
+                    refundRequest.Id);
+            }
+        }
+
+        private void TryMarkEmailLogFailed(
+            string messageKey,
+            Exception emailException)
+        {
+            try
+            {
+                _emailDeliveryLogService.MarkFailed(
+                    messageKey,
+                    emailException.Message);
+            }
+            catch (Exception logException)
+            {
+                Logger.LogError(
+                    logException,
+                    "Email failure could not be recorded for message {MessageKey}.",
+                    messageKey);
+            }
+        }
+
+
     }
 }

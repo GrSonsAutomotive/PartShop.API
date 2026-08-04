@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Http;
@@ -6,6 +7,8 @@ namespace Site_2024.Models.Requests.RefundRequests
 {
     public class RefundRequestCustomerSubmitRequest
     {
+        [Required]
+        public Guid? ClientSubmissionId { get; set; }
         [Required]
         [StringLength(100)]
         public string OrderNumber { get; set; } = string.Empty;

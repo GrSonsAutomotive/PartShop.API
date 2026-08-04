@@ -8,6 +8,10 @@ namespace Site_2024.Web.Api.Services
 {
     public class AuthenticationService : IAuthenticationService<IUserAuthData>
     {
+        private const string UsernameClaim = "site_username";
+        private const string IsActiveClaim = "site_is_active";
+        private const string MustChangePasswordClaim = "site_must_change_password";
+
         private readonly IHttpContextAccessor _httpContextAccessor;
 
         public AuthenticationService(IHttpContextAccessor httpContextAccessor)
@@ -22,6 +26,9 @@ namespace Site_2024.Web.Api.Services
                 new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
                 new Claim(ClaimTypes.Name, user.Name ?? string.Empty),
                 new Claim(ClaimTypes.Email, user.Email ?? string.Empty),
+                new Claim(UsernameClaim, user.Username ?? string.Empty),
+                new Claim(IsActiveClaim, user.IsActive ? "true" : "false"),
+                new Claim(MustChangePasswordClaim, user.MustChangePassword ? "true" : "false")
             };
 
             if (!string.IsNullOrWhiteSpace(user.RoleName))
@@ -50,10 +57,6 @@ namespace Site_2024.Web.Api.Services
                 principal,
                 props);
 
-            // SignInAsync writes the authentication cookie for the next request,
-            // but it does not automatically replace HttpContext.User during the
-            // current login request. Set it explicitly so LoginApiController can
-            // immediately return the authenticated user profile on the first try.
             httpContext.User = principal;
         }
 
@@ -77,14 +80,13 @@ namespace Site_2024.Web.Api.Services
                 return null;
             }
 
-            string idClaim =
-                context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            string nameClaim =
-                context.User.FindFirst(ClaimTypes.Name)?.Value;
-            string emailClaim =
-                context.User.FindFirst(ClaimTypes.Email)?.Value;
-            string roleClaim =
-                context.User.FindFirst(ClaimTypes.Role)?.Value;
+            string idClaim = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            string nameClaim = context.User.FindFirst(ClaimTypes.Name)?.Value;
+            string usernameClaim = context.User.FindFirst(UsernameClaim)?.Value;
+            string emailClaim = context.User.FindFirst(ClaimTypes.Email)?.Value;
+            string roleClaim = context.User.FindFirst(ClaimTypes.Role)?.Value;
+            string activeClaim = context.User.FindFirst(IsActiveClaim)?.Value;
+            string mustChangeClaim = context.User.FindFirst(MustChangePasswordClaim)?.Value;
 
             if (!int.TryParse(idClaim, out int userId))
             {
@@ -95,8 +97,11 @@ namespace Site_2024.Web.Api.Services
             {
                 Id = userId,
                 Name = nameClaim,
+                Username = usernameClaim,
                 Email = emailClaim,
-                RoleName = roleClaim
+                RoleName = roleClaim,
+                IsActive = string.Equals(activeClaim, "true", StringComparison.OrdinalIgnoreCase),
+                MustChangePassword = string.Equals(mustChangeClaim, "true", StringComparison.OrdinalIgnoreCase)
             };
         }
 

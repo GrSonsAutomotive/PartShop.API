@@ -24,6 +24,13 @@ namespace Site_2024.Web.Api.Services
 
         public int Add(RefundRequestAddRequest model, int? userId)
         {
+            return AddWithResult(model, userId).Id;
+        }
+
+        public RefundRequestCreateResult AddWithResult(
+            RefundRequestAddRequest model,
+            int? userId)
+        {
             if (model == null)
             {
                 throw new ArgumentNullException(nameof(model));
@@ -40,38 +47,55 @@ namespace Site_2024.Web.Api.Services
                     "Enter a Part Id, Shopify Order Id, or Order Number so the request can be located later.");
             }
 
-            int id = 0;
+            RefundRequestCreateResult result =
+                new RefundRequestCreateResult();
+
             const string procName = "[dbo].[RefundRequests_Insert]";
 
-            _data.ExecuteCmd(procName,
+            _data.ExecuteCmd(
+                procName,
                 inputParamMapper: delegate (SqlParameterCollection col)
                 {
                     AddCommonParams(model, col);
 
                     col.AddWithValue(
                         "@CreatedByUserId",
-                        userId.HasValue ? userId.Value : DBNull.Value
-                    );
+                        userId.HasValue ? userId.Value : DBNull.Value);
 
                     SqlParameter idOut = new SqlParameter("@Id", SqlDbType.Int)
                     {
                         Direction = ParameterDirection.Output,
                         Value = 0
                     };
-
                     col.Add(idOut);
+
+                    SqlParameter wasCreatedOut =
+                        new SqlParameter("@WasCreated", SqlDbType.Bit)
+                        {
+                            Direction = ParameterDirection.Output,
+                            Value = false
+                        };
+                    col.Add(wasCreatedOut);
                 },
                 singleRecordMapper: delegate (IDataReader reader, short set)
                 {
                     if (set == 0)
                     {
-                        id = Convert.ToInt32(reader["Id"]);
+                        result.Id = Convert.ToInt32(reader["Id"]);
+                        result.WasCreated =
+                            Convert.ToBoolean(reader["WasCreated"]);
                     }
                 });
 
-            if (id <= 0)
+            if (result.Id <= 0)
             {
-                throw new Exception("RefundRequests_Insert did not return a valid RefundRequest Id.");
+                throw new Exception(
+                    "RefundRequests_Insert did not return a valid RefundRequest Id.");
+            }
+
+            if (!result.WasCreated)
+            {
+                return result;
             }
 
             if (model.Items != null)
@@ -91,7 +115,7 @@ namespace Site_2024.Web.Api.Services
 
                     if (!isDefaultPrimaryItem)
                     {
-                        AddItem(id, item);
+                        AddItem(result.Id, item);
                     }
                 }
             }
@@ -100,14 +124,15 @@ namespace Site_2024.Web.Api.Services
             {
                 foreach (RefundRequestPhotoAddRequest photo in model.Photos)
                 {
-                    if (photo != null && !string.IsNullOrWhiteSpace(photo.Url))
+                    if (photo != null
+                        && !string.IsNullOrWhiteSpace(photo.Url))
                     {
-                        AddPhoto(id, photo);
+                        AddPhoto(result.Id, photo);
                     }
                 }
             }
 
-            return id;
+            return result;
         }
 
         public RefundRequest? GetById(int id)
@@ -793,21 +818,47 @@ namespace Site_2024.Web.Api.Services
                 returnParameters: null);
         }
 
-        public void UpdateStatus(int id, RefundRequestUpdateStatusRequest model, int userId)
+        public bool UpdateStatus(
+            int id,
+            RefundRequestUpdateStatusRequest model,
+            int userId)
         {
+            bool statusChanged = false;
             const string procName = "[dbo].[RefundRequests_UpdateStatus]";
 
-            _data.ExecuteNonQuery(procName,
+            _data.ExecuteCmd(
+                procName,
                 inputParamMapper: delegate (SqlParameterCollection col)
                 {
                     col.AddWithValue("@Id", id);
                     col.AddWithValue("@Status", model.Status);
-                    col.AddWithValue("@Notes", string.IsNullOrWhiteSpace(model.Notes) ? DBNull.Value : model.Notes);
+                    col.AddWithValue(
+                        "@Notes",
+                        string.IsNullOrWhiteSpace(model.Notes)
+                            ? DBNull.Value
+                            : model.Notes);
                     col.AddWithValue("@ResolvedByUserId", userId);
-                    col.AddWithValue("@AdminNotes", string.IsNullOrWhiteSpace(model.AdminNotes) ? DBNull.Value : model.AdminNotes);
-                    col.AddWithValue("@DenialReason", string.IsNullOrWhiteSpace(model.DenialReason) ? DBNull.Value : model.DenialReason);
+                    col.AddWithValue(
+                        "@AdminNotes",
+                        string.IsNullOrWhiteSpace(model.AdminNotes)
+                            ? DBNull.Value
+                            : model.AdminNotes);
+                    col.AddWithValue(
+                        "@DenialReason",
+                        string.IsNullOrWhiteSpace(model.DenialReason)
+                            ? DBNull.Value
+                            : model.DenialReason);
                 },
-                returnParameters: null);
+                singleRecordMapper: delegate (IDataReader reader, short set)
+                {
+                    if (set == 0)
+                    {
+                        statusChanged =
+                            Convert.ToBoolean(reader["StatusChanged"]);
+                    }
+                });
+
+            return statusChanged;
         }
 
         private static RefundRequest MapRefundRequest(IDataReader reader, ref int startingIndex)
@@ -1122,6 +1173,12 @@ namespace Site_2024.Web.Api.Services
         private static void AddCommonParams(RefundRequestAddRequest model, SqlParameterCollection col)
         {
             long? shopifyOrderId = ParseShopifyOrderId(model.ShopifyOrderId);
+
+            col.AddWithValue(
+                "@ClientSubmissionId",
+                model.ClientSubmissionId.HasValue
+                    ? model.ClientSubmissionId.Value
+                    : DBNull.Value);
 
             col.AddWithValue(
                 "@PartId",

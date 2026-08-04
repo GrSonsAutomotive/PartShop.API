@@ -8,9 +8,9 @@ namespace Site_2024.Web.Api.Requests
         public int MakeId { get; set; }
 
         [Range(1900, 3000)]
-        public int YearStart { get; set; }
+        public int? YearStart { get; set; }
 
         [Range(1900, 3000)]
-        public int YearEnd { get; set; }
+        public int? YearEnd { get; set; }
     }
 }

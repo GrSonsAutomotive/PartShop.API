@@ -1,9 +1,11 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Site_2024.Web.Api.Interfaces;
 using Site_2024.Web.Api.Models.User;
 using Site_2024.Web.Api.Requests;
 using Site_2024.Web.Api.Responses;
 using Site_2024.Web.Api.Services;
+using System.Data.SqlClient;
 
 namespace Site_2024.Web.Api.Controllers
 {
@@ -24,6 +26,7 @@ namespace Site_2024.Web.Api.Controllers
         }
 
         [HttpPost("register")]
+        [Authorize(Policy = "UserAdmin")]
         public ActionResult<ItemResponse<int>> Register(
             [FromBody] UserRegisterRequest model)
         {
@@ -35,17 +38,24 @@ namespace Site_2024.Web.Api.Controllers
                 int id = _service.Create(model);
                 response = new ItemResponse<int> { Item = id };
             }
+            catch (SqlException ex) when (ex.Number == 2601 || ex.Number == 2627 || ex.Number == 50024 || ex.Number == 50025)
+            {
+                code = 409;
+                Logger.LogWarning(ex, "Duplicate username or email during user creation.");
+                response = new ErrorResponse("That username or email is already in use.");
+            }
             catch (Exception ex)
             {
                 code = 500;
-                Logger.LogError(ex, "Unable to register user.");
-                response = new ErrorResponse("Unable to register user.");
+                Logger.LogError(ex, "Unable to create user.");
+                response = new ErrorResponse("Unable to create user.");
             }
 
             return StatusCode(code, response);
         }
 
         [HttpPost("login")]
+        [AllowAnonymous]
         public async Task<ActionResult<ItemResponse<AuthenticatedUser>>> Login(
             [FromBody] UserLoginRequest model)
         {
@@ -54,14 +64,25 @@ namespace Site_2024.Web.Api.Controllers
 
             try
             {
+                string login = !string.IsNullOrWhiteSpace(model.Login)
+                    ? model.Login.Trim()
+                    : model.Email?.Trim();
+
+                if (string.IsNullOrWhiteSpace(login))
+                {
+                    code = 400;
+                    response = new ErrorResponse("Username is required.");
+                    return StatusCode(code, response);
+                }
+
                 bool success = await _service.LogInAsync(
-                    model.Email.Trim(),
+                    login,
                     model.Password);
 
                 if (!success)
                 {
                     code = 401;
-                    response = new ErrorResponse("Invalid email or password.");
+                    response = new ErrorResponse("Invalid username or password.");
                 }
                 else
                 {
@@ -78,6 +99,47 @@ namespace Site_2024.Web.Api.Controllers
                 code = 500;
                 Logger.LogError(ex, "Unable to log in.");
                 response = new ErrorResponse("Unable to log in at this time.");
+            }
+
+            return StatusCode(code, response);
+        }
+
+
+        [HttpPost("change-password")]
+        [Authorize]
+        public async Task<ActionResult<SuccessResponse>> ChangePassword(
+            [FromBody] UserChangePasswordRequest model)
+        {
+            int code = 200;
+            BaseResponse response;
+
+            try
+            {
+                IUserAuthData currentUser = _authService.GetCurrentUser();
+
+                if (currentUser == null)
+                {
+                    return Unauthorized(new ErrorResponse("Not logged in."));
+                }
+
+                bool changed = _service.ChangePassword(currentUser.Id, model);
+
+                if (!changed)
+                {
+                    code = 400;
+                    response = new ErrorResponse("The current password is incorrect.");
+                }
+                else
+                {
+                    await _authService.LogOutAsync();
+                    response = new SuccessResponse();
+                }
+            }
+            catch (Exception ex)
+            {
+                code = 500;
+                Logger.LogError(ex, "Unable to change password.");
+                response = new ErrorResponse("Unable to change password at this time.");
             }
 
             return StatusCode(code, response);
@@ -118,6 +180,7 @@ namespace Site_2024.Web.Api.Controllers
         }
 
         [HttpGet("current")]
+        [Authorize(Policy = "UserAdmin")]
         public ActionResult<ItemResponse<User>> GetUserByEmail(
             [FromQuery] string email)
         {
@@ -162,7 +225,6 @@ namespace Site_2024.Web.Api.Controllers
                     await _authService.LogOutAsync();
                 }
 
-                // Logout is idempotent. An already-expired session is still a success.
                 response = new SuccessResponse();
             }
             catch (Exception ex)
@@ -186,8 +248,10 @@ namespace Site_2024.Web.Api.Controllers
             {
                 Id = user.Id,
                 Name = user.Name,
+                Username = user.Username,
                 Email = user.Email,
-                RoleName = user.RoleName
+                RoleName = user.RoleName,
+                MustChangePassword = user.MustChangePassword
             };
         }
     }

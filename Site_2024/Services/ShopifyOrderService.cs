@@ -42,7 +42,7 @@ namespace Site_2024.Web.Api.Services
         {
             first = first <= 0 ? 25 : Math.Min(first, 50);
 
-            string? orderQuery = BuildOrderQuery(view);
+            string? orderQuery = ApplyProductionCutoverFilter(BuildOrderQuery(view));
 
             string query = @"
 query GetRecentOrders($first: Int!, $query: String) {
@@ -201,7 +201,9 @@ query GetReturnOrder($query: String!) {
 }";
 
             string searchQuery =
-                $"name:{QuoteSearchValue(normalizedOrderName)}";
+                ApplyProductionCutoverFilter(
+                    $"name:{QuoteSearchValue(normalizedOrderName)}")
+                ?? $"name:{QuoteSearchValue(normalizedOrderName)}";
 
             using JsonDocument doc =
                 await SendGraphQlAsync(
@@ -1913,6 +1915,24 @@ query GetSuggestedRefund(
             }
 
             return JsonDocument.Parse(responseText);
+        }
+
+        private string? ApplyProductionCutoverFilter(string? query)
+        {
+            if (!_settings.ProductionCutoverUtc.HasValue)
+            {
+                return query;
+            }
+
+            string cutoff = _settings.ProductionCutoverUtc.Value
+                .ToUniversalTime()
+                .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+
+            string cutoffClause = $"created_at:>='{cutoff}'";
+
+            return string.IsNullOrWhiteSpace(query)
+                ? cutoffClause
+                : $"{query} {cutoffClause}";
         }
 
         private static string? BuildOrderQuery(string? view)

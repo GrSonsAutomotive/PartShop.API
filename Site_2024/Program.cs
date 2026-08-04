@@ -93,6 +93,7 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("AdminAction", p => p.RequireRole("AdminLow", "AdminHigh")); // broad internal review access
     options.AddPolicy("RefundCommit", p => p.RequireRole("AdminHigh"));
     options.AddPolicy("InventoryDispositionCommit", p => p.RequireRole("AdminHigh"));
+    options.AddPolicy("UserAdmin", p => p.RequireRole("AdminHigh"));
 });
 
 
@@ -127,6 +128,7 @@ builder.Services.Configure<ContactEmailSettings>(
     builder.Configuration.GetSection("ContactEmailSettings"));
 
 builder.Services.AddScoped<ISmtpEmailService, SmtpEmailService>();
+builder.Services.AddScoped<IEmailDeliveryLogService, EmailDeliveryLogService>();
 
 builder.Services.Configure<ShopifySettings>(
     builder.Configuration.GetSection("ShopifySettings"));
