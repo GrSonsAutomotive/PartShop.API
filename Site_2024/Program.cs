@@ -9,9 +9,25 @@ using Site_2024.Web.Api.Models;
 using Site_2024.Web.Api.Models.User;
 using Site_2024.Web.Api.Services;
 
-var builder = WebApplication.CreateBuilder(args);
+// Create the physical web root before ASP.NET Core initializes IWebHostEnvironment.
+// Empty folders are not always included in deployment packages, so the API must
+// recreate its upload folders every time it starts.
+var contentRootPath = Directory.GetCurrentDirectory();
+var webRootPath = Path.Combine(contentRootPath, "wwwroot");
+
+Directory.CreateDirectory(webRootPath);
+Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "items"));
+Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "returns"));
+
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = contentRootPath,
+    WebRootPath = webRootPath
+});
+
 builder.Configuration
-    .SetBasePath(Directory.GetCurrentDirectory())
+    .SetBasePath(contentRootPath)
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
     .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true)
     .AddEnvironmentVariables();
@@ -159,15 +175,14 @@ if (app.Environment.IsDevelopment())
 }
 
 
-Console.WriteLine("Static file middleware configured...");
+app.Logger.LogInformation("Static files configured from {WebRootPath}", webRootPath);
 
 // Global exception handling (returns our standard BaseResponse shape)
 app.UseMiddleware<ApiExceptionMiddleware>();
 
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new PhysicalFileProvider(
-        Path.Combine(Directory.GetCurrentDirectory(), "wwwroot")),
+    FileProvider = new PhysicalFileProvider(webRootPath),
     RequestPath = ""
 });
 
