@@ -65,7 +65,8 @@ builder.Services.AddCors(options =>
                 "https://red-pond-0503f431e.2.azurestaticapps.net",
                 "https://red-pond-0503f431e-1.westus2.2.azurestaticapps.net",
                 "https://grsonsautomotive.com",
-                "https://www.grsonsautomotive.com"
+                "https://www.grsonsautomotive.com",
+                "https://victorious-tree-058c9371e.7.azurestaticapps.net"
             )
             .AllowAnyMethod()
             .AllowAnyHeader()
