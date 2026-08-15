@@ -1,4 +1,4 @@
-﻿using Site_2024.Web.Api.Interfaces;
+using Site_2024.Web.Api.Interfaces;
 using Site_2024.Web.Api.Models;
 using System.Data;
 using System.Linq;
@@ -506,6 +506,7 @@ namespace Site_2024.Web.Api.Services
                 col.Add("@Id", SqlDbType.Int).Value = id;
                 col.Add("@Name", SqlDbType.NVarChar, 128).Value = (object?)model.Name ?? DBNull.Value;
                 col.Add("@PartNumber", SqlDbType.NVarChar, 128).Value = (object?)model.PartNumber ?? DBNull.Value;
+                col.Add("@Brand", SqlDbType.NVarChar, 128).Value = (object?)model.Brand ?? DBNull.Value;
 
                 SqlParameter pPrice = col.Add("@Price", SqlDbType.Decimal);
                 pPrice.Precision = 18;
@@ -567,6 +568,7 @@ namespace Site_2024.Web.Api.Services
             col.AddWithValue("@makeId", model.MakeId);
             col.AddWithValue("@year", (object?)model.Year ?? DBNull.Value);
             col.AddWithValue("@partnumber", model.PartNumber);
+            col.AddWithValue("@Brand", (object?)model.Brand ?? DBNull.Value);
             col.AddWithValue("@catagoryId", model.CatagoryId);
             col.AddWithValue("@description", model.Description);
             col.AddWithValue("@price", model.Price);
@@ -609,6 +611,7 @@ namespace Site_2024.Web.Api.Services
             part.Make.Model.Name = reader.GetSafeString(startingIndex++);
             part.Year = reader.GetSafeString(startingIndex++);
             part.PartNumber = reader.GetSafeString(startingIndex++);
+            part.Brand = reader.GetSafeString(startingIndex++);
             part.Description = reader.GetSafeString(startingIndex++);
             part.Price = reader.GetSafeDecimal(startingIndex++);
             part.Quantity = reader.GetSafeInt32(startingIndex++);
@@ -674,6 +677,7 @@ namespace Site_2024.Web.Api.Services
             part.Make.Model.Name = reader.GetSafeString(startingIndex++);
             part.Year = reader.GetSafeString(startingIndex++);
             part.PartNumber = reader.GetSafeString(startingIndex++);
+            part.Brand = reader.GetSafeString(startingIndex++);
             part.Description = reader.GetSafeString(startingIndex++);
             part.Price = reader.GetSafeDecimal(startingIndex++);
             part.Quantity = reader.GetSafeInt32(startingIndex++);

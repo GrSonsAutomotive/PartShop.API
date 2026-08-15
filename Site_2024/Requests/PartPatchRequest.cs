@@ -1,9 +1,10 @@
-﻿namespace Site_2024.Web.Api.Requests
+namespace Site_2024.Web.Api.Requests
 {
     public sealed class PartPatchRequest
     {
         public string? Name { get; set; }
         public string? PartNumber { get; set; }
+        public string? Brand { get; set; }
         public decimal? Price { get; set; }
         public int? AvailableId { get; set; }
         public int? Quantity { get; set; }

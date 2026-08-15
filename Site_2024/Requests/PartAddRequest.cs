@@ -1,4 +1,4 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
 namespace Site_2024.Web.Api.Requests
 {
@@ -21,6 +21,9 @@ namespace Site_2024.Web.Api.Requests
 
         [Required, StringLength(128, MinimumLength = 2)]
         public string PartNumber { get; set; }
+
+        [StringLength(128)]
+        public string? Brand { get; set; }
 
         [Required, StringLength(4000, MinimumLength = 2)]
         public string Description { get; set; }

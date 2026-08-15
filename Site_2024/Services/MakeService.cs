@@ -1,4 +1,4 @@
-﻿using Site_2024.Web.Api.Interfaces;
+using Site_2024.Web.Api.Interfaces;
 using Site_2024.Web.Api.Models;
 using System.Data;
 using System.Linq;
@@ -114,6 +114,33 @@ namespace Site_2024.Web.Api.Services
             return id;
         }
 
+        public int AddMakeModel(MakeModelAdminCreateRequest model)
+        {
+            int makeId = 0;
+            const string procName = "[dbo].[MakeModel_AdminCreate]";
+
+            _data.ExecuteNonQuery(
+                procName,
+                inputParamMapper: delegate (SqlParameterCollection col)
+                {
+                    col.Add("@Company", SqlDbType.NVarChar, 128).Value = model.Company.Trim();
+                    col.Add("@ModelName", SqlDbType.NVarChar, 128).Value = model.ModelName.Trim();
+
+                    SqlParameter makeIdOut = new SqlParameter("@MakeId", SqlDbType.Int)
+                    {
+                        Direction = ParameterDirection.Output
+                    };
+                    col.Add(makeIdOut);
+                },
+                returnParameters: delegate (SqlParameterCollection returnCollection)
+                {
+                    object value = returnCollection["@MakeId"].Value;
+                    int.TryParse(value?.ToString(), out makeId);
+                });
+
+            return makeId;
+        }
+
         public void UpdateMake(MakeUpdateRequest make)
         {
             string procName = "[dbo].[Make_Update]";
@@ -147,8 +174,8 @@ namespace Site_2024.Web.Api.Services
 
         private static void AddCommonMakeParams(MakeAddRequest make, SqlParameterCollection col)
         {
-            col.AddWithValue("@name", make.Company);
-            col.AddWithValue("@name", make.ModelId);
+            col.AddWithValue("@company", make.Company);
+            col.AddWithValue("@modelId", make.ModelId);
         }
         
         private Make MapMakeForDisplay(IDataReader reader, ref int startingIndex)

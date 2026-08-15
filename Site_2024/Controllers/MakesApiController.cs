@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Site_2024.Web.Api.Models;
@@ -127,6 +127,41 @@ namespace Site_2024.Web.Api.Controllers
             {
                 code = 500;
                 base.Logger.LogError(ex.ToString());
+                response = new ErrorResponse(ex.Message);
+            }
+
+            return StatusCode(code, response);
+        }
+
+        [HttpPost("make-model")]
+        [Authorize(Policy = "AdminAction")]
+        public ActionResult<ItemResponse<int>> AddMakeModel([FromBody] MakeModelAdminCreateRequest model)
+        {
+            int code = 201;
+            BaseResponse response;
+
+            try
+            {
+                if (model == null)
+                {
+                    return BadRequest(new ErrorResponse("Make/model payload is required."));
+                }
+
+                model.Company = model.Company?.Trim();
+                model.ModelName = model.ModelName?.Trim();
+
+                if (string.IsNullOrWhiteSpace(model.Company) || string.IsNullOrWhiteSpace(model.ModelName))
+                {
+                    return BadRequest(new ErrorResponse("Make and model are required."));
+                }
+
+                int id = _service.AddMakeModel(model);
+                response = new ItemResponse<int> { Item = id };
+            }
+            catch (Exception ex)
+            {
+                code = 400;
+                base.Logger.LogError(ex, "Failed to create make/model combination.");
                 response = new ErrorResponse(ex.Message);
             }
 

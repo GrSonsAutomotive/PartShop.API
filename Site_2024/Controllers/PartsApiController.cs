@@ -575,6 +575,7 @@ namespace Site_2024.Web.Api.Controllers
                 // empty string so an admin can clear those optional fields.
                 model.Name = model.Name?.Trim();
                 model.PartNumber = model.PartNumber?.Trim();
+                model.Brand = model.Brand?.Trim();
                 model.Description = model.Description?.Trim();
                 model.Image = string.IsNullOrWhiteSpace(model.Image) ? null : model.Image.Trim();
                 model.OtherBox = model.OtherBox?.Trim();
@@ -604,6 +605,12 @@ namespace Site_2024.Web.Api.Controllers
                 {
                     code = 400;
                     return StatusCode(code, new ErrorResponse("Part number must be between 2 and 128 characters."));
+                }
+
+                if (model.Brand != null && model.Brand.Length > 128)
+                {
+                    code = 400;
+                    return StatusCode(code, new ErrorResponse("Brand cannot exceed 128 characters."));
                 }
 
                 if (model.Description != null && model.Description.Length < 2)
@@ -853,6 +860,7 @@ namespace Site_2024.Web.Api.Controllers
                 || m.ShippingPolicyId.HasValue
                 || m.Name != null
                 || m.PartNumber != null
+                || m.Brand != null
                 || m.Description != null
                 || !string.IsNullOrWhiteSpace(m.Image)
                 || m.OtherBox != null
