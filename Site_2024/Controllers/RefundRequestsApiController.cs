@@ -1,22 +1,13 @@
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
-using Site_2024.Models;
 using Site_2024.Models.Domain.RefundRequests;
 using Site_2024.Models.Requests.RefundRequests;
 using Site_2024.Web.Api.Constructors;
 using Site_2024.Web.Api.Interfaces;
+using Site_2024.Web.Api.Models;
 using Site_2024.Web.Api.Models.User;
 using Site_2024.Web.Api.Responses;
 using Site_2024.Web.Api.Services;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
-using Site_2024.Web.Api.Models;
 
 namespace Site_2024.Web.Api.Controllers
 {
@@ -28,6 +19,7 @@ namespace Site_2024.Web.Api.Controllers
         private readonly IShopifyOrderService _shopifyOrderService;
         private readonly IAuthenticationService<IUserAuthData> _authService;
         private readonly IWebHostEnvironment _webHostEnvironment;
+        private readonly IConfiguration _configuration;
         private readonly ISmtpEmailService _emailService;
         private readonly IEmailDeliveryLogService _emailDeliveryLogService;
 
@@ -36,6 +28,7 @@ namespace Site_2024.Web.Api.Controllers
             IShopifyOrderService shopifyOrderService,
             IAuthenticationService<IUserAuthData> authService,
             IWebHostEnvironment webHostEnvironment,
+            IConfiguration configuration,
             ISmtpEmailService emailService,
             IEmailDeliveryLogService emailDeliveryLogService,
             ILogger<RefundRequestsApiController> logger)
@@ -45,6 +38,7 @@ namespace Site_2024.Web.Api.Controllers
             _shopifyOrderService = shopifyOrderService;
             _authService = authService;
             _webHostEnvironment = webHostEnvironment;
+            _configuration = configuration;
             _emailService = emailService;
             _emailDeliveryLogService = emailDeliveryLogService;
         }
@@ -1979,7 +1973,12 @@ namespace Site_2024.Web.Api.Controllers
             string[] allowed = { ".jpg", ".jpeg", ".png", ".webp" };
             const long maxBytes = 5 * 1024 * 1024;
 
-            string uploadsFolder = Path.Combine(_webHostEnvironment.WebRootPath, "uploads", "returns");
+            string uploadRoot =
+                _configuration["UploadStorage:RootPath"]
+                ?? Path.Combine(_webHostEnvironment.WebRootPath, "uploads");
+
+            string uploadsFolder = Path.Combine(uploadRoot, "returns");
+
             Directory.CreateDirectory(uploadsFolder);
 
             for (int i = 0; i < photos.Count; i++)

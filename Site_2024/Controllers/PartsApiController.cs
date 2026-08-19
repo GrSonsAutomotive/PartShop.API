@@ -23,6 +23,7 @@ namespace Site_2024.Web.Api.Controllers
         private readonly IShopifyAdminService _shopifyAdminService;
         private readonly IAuthenticationService<IUserAuthData> _authService;
         private readonly IWebHostEnvironment _webHostEnvironment;
+        private readonly IConfiguration _configuration;
 
         public PartsApiController(
             IPartService service,
@@ -32,7 +33,8 @@ namespace Site_2024.Web.Api.Controllers
             IShopifyAdminService shopifyAdminService,
             ILogger<PartsApiController> logger,
             IAuthenticationService<IUserAuthData> authService,
-            IWebHostEnvironment webHostEnvironment
+            IWebHostEnvironment webHostEnvironment,
+            IConfiguration configuration
         ) : base(logger)
         {
             _service = service;
@@ -42,6 +44,7 @@ namespace Site_2024.Web.Api.Controllers
             _shopifyAdminService = shopifyAdminService;
             _authService = authService;
             _webHostEnvironment = webHostEnvironment;
+            _configuration = configuration;
         }
 
         [HttpPost("add-new")]
@@ -92,7 +95,12 @@ namespace Site_2024.Web.Api.Controllers
                         return StatusCode(code, response);
                     }
 
-                    string uploadsFolder = Path.Combine(_webHostEnvironment.WebRootPath, "uploads", "items");
+                    string uploadRoot =
+                        _configuration["UploadStorage:RootPath"]
+                        ?? Path.Combine(_webHostEnvironment.WebRootPath, "uploads");
+
+                    string uploadsFolder = Path.Combine(uploadRoot, "items");
+
                     Directory.CreateDirectory(uploadsFolder);
 
                     string fileName = $"{Guid.NewGuid()}{ext}";
@@ -465,7 +473,12 @@ namespace Site_2024.Web.Api.Controllers
                 string[] allowed = { ".jpg", ".jpeg", ".png", ".webp" };
                 const long maxBytes = 5 * 1024 * 1024;
 
-                string uploadsFolder = Path.Combine(_webHostEnvironment.WebRootPath, "uploads", "items");
+                string uploadRoot =
+                    _configuration["UploadStorage:RootPath"]
+                    ?? Path.Combine(_webHostEnvironment.WebRootPath, "uploads");
+
+                string uploadsFolder = Path.Combine(uploadRoot, "items");
+
                 Directory.CreateDirectory(uploadsFolder);
 
                 var urls = new List<string>();

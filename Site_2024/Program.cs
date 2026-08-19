@@ -9,15 +9,32 @@ using Site_2024.Web.Api.Models;
 using Site_2024.Web.Api.Models.User;
 using Site_2024.Web.Api.Services;
 
-// Create the physical web root before ASP.NET Core initializes IWebHostEnvironment.
-// Empty folders are not always included in deployment packages, so the API must
-// recreate its upload folders every time it starts.
+// Application files live under the deployed wwwroot.
+// Runtime uploads MUST live outside that deployment tree in Azure so that
+// deployments cannot delete customer/product photos.
 var contentRootPath = Directory.GetCurrentDirectory();
 var webRootPath = Path.Combine(contentRootPath, "wwwroot");
 
+var homePath = Environment.GetEnvironmentVariable("HOME");
+var azureSiteName = Environment.GetEnvironmentVariable("WEBSITE_SITE_NAME");
+
+bool isAzureAppService =
+    !string.IsNullOrWhiteSpace(azureSiteName) &&
+    !string.IsNullOrWhiteSpace(homePath);
+
+// Azure:
+//   %HOME%\data\Site_2024\Uploads
+//
+// Local development:
+//   <project>\wwwroot\uploads
+var uploadRootPath = isAzureAppService
+    ? Path.Combine(homePath!, "data", "Site_2024", "Uploads")
+    : Path.Combine(webRootPath, "uploads");
+
 Directory.CreateDirectory(webRootPath);
-Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "items"));
-Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "returns"));
+Directory.CreateDirectory(uploadRootPath);
+Directory.CreateDirectory(Path.Combine(uploadRootPath, "items"));
+Directory.CreateDirectory(Path.Combine(uploadRootPath, "returns"));
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -25,6 +42,9 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     ContentRootPath = contentRootPath,
     WebRootPath = webRootPath
 });
+
+// Make the resolved upload path available to controllers.
+builder.Configuration["UploadStorage:RootPath"] = uploadRootPath;
 
 builder.Configuration
     .SetBasePath(contentRootPath)
@@ -176,11 +196,24 @@ if (app.Environment.IsDevelopment())
 }
 
 
-app.Logger.LogInformation("Static files configured from {WebRootPath}", webRootPath);
+app.Logger.LogInformation(
+    "Static files configured from {WebRootPath}. Uploads configured from {UploadRootPath}",
+    webRootPath,
+    uploadRootPath);
 
 // Global exception handling (returns our standard BaseResponse shape)
 app.UseMiddleware<ApiExceptionMiddleware>();
 
+// IMPORTANT:
+// /uploads is served from persistent storage FIRST.
+// This means product/return photos never depend on deployed wwwroot content.
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(uploadRootPath),
+    RequestPath = "/uploads"
+});
+
+// Normal application static files, if any.
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(webRootPath),
