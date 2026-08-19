@@ -186,6 +186,8 @@ builder.Services.Configure<StaticFileOptions>(
 
 var app = builder.Build();
 
+// TEST CHANGE FOR PROOF OF PHOTO UPLOAD
+
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
