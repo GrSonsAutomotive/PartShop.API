@@ -571,11 +571,16 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(code, new ErrorResponse("Patch payload is required."));
                 }
 
-                // Normalize strings
-                model.Description = string.IsNullOrWhiteSpace(model.Description) ? null : model.Description.Trim();
+                // Normalize strings. OtherBox/AdminNotes deliberately preserve an
+                // empty string so an admin can clear those optional fields.
+                model.Name = model.Name?.Trim();
+                model.PartNumber = model.PartNumber?.Trim();
+                model.Brand = model.Brand?.Trim();
+                model.Description = model.Description?.Trim();
                 model.Image = string.IsNullOrWhiteSpace(model.Image) ? null : model.Image.Trim();
-                model.OtherBox = string.IsNullOrWhiteSpace(model.OtherBox) ? null : model.OtherBox.Trim();
-                model.AdminNotes = string.IsNullOrWhiteSpace(model.AdminNotes) ? null : model.AdminNotes.Trim();
+                model.OtherBox = model.OtherBox?.Trim();
+                model.AdminNotes = model.AdminNotes?.Trim();
+                model.Year = model.Year?.Trim();
 
                 if (model.Quantity.HasValue && model.Quantity.Value < 0)
                 {
@@ -588,6 +593,114 @@ namespace Site_2024.Web.Api.Controllers
                 {
                     code = 400;
                     return StatusCode(code, new ErrorResponse("At least one field is required to patch."));
+                }
+
+                if (model.Name != null && (model.Name.Length < 2 || model.Name.Length > 128))
+                {
+                    code = 400;
+                    return StatusCode(code, new ErrorResponse("Part name must be between 2 and 128 characters."));
+                }
+
+                if (model.PartNumber != null && (model.PartNumber.Length < 2 || model.PartNumber.Length > 128))
+                {
+                    code = 400;
+                    return StatusCode(code, new ErrorResponse("Part number must be between 2 and 128 characters."));
+                }
+
+                if (model.Brand != null && model.Brand.Length > 128)
+                {
+                    code = 400;
+                    return StatusCode(code, new ErrorResponse("Brand cannot exceed 128 characters."));
+                }
+
+                if (model.Description != null && model.Description.Length < 2)
+                {
+                    code = 400;
+                    return StatusCode(code, new ErrorResponse("Description must be at least 2 characters."));
+                }
+
+                if (model.Year != null && model.Year.Length > 50)
+                {
+                    code = 400;
+                    return StatusCode(code, new ErrorResponse("Year(s) cannot exceed 50 characters."));
+                }
+
+                if (model.OtherBox != null && model.OtherBox.Length > 100)
+                {
+                    code = 400;
+                    return StatusCode(code, new ErrorResponse("Other Box cannot exceed 100 characters."));
+                }
+
+                if (model.Categories != null)
+                {
+                    if (model.Categories.Count == 0)
+                    {
+                        code = 400;
+                        return StatusCode(code, new ErrorResponse("At least one category is required."));
+                    }
+
+                    if (model.Categories.Any(category => category.CatagoryId <= 0))
+                    {
+                        code = 400;
+                        return StatusCode(code, new ErrorResponse("Every category must have a valid category ID."));
+                    }
+
+                    if (model.Categories
+                        .GroupBy(category => category.CatagoryId)
+                        .Any(group => group.Count() > 1))
+                    {
+                        code = 400;
+                        return StatusCode(code, new ErrorResponse("A category cannot be assigned more than once."));
+                    }
+                }
+
+                if (model.Fitments != null)
+                {
+                    if (model.Fitments.Count == 0)
+                    {
+                        code = 400;
+                        return StatusCode(code, new ErrorResponse("At least one make/model fitment is required."));
+                    }
+
+                    foreach (PartFitmentAddRequest fitment in model.Fitments)
+                    {
+                        if (fitment.MakeId <= 0)
+                        {
+                            code = 400;
+                            return StatusCode(code, new ErrorResponse("Every fitment must have a valid make/model."));
+                        }
+
+                        bool hasStart = fitment.YearStart.HasValue;
+                        bool hasEnd = fitment.YearEnd.HasValue;
+
+                        if (hasStart != hasEnd)
+                        {
+                            code = 400;
+                            return StatusCode(code, new ErrorResponse("Fitment start and end years must both be supplied, or both omitted."));
+                        }
+
+                        if (hasStart &&
+                            (fitment.YearStart!.Value < 1900 || fitment.YearStart.Value > 3000 ||
+                             fitment.YearEnd!.Value < 1900 || fitment.YearEnd.Value > 3000))
+                        {
+                            code = 400;
+                            return StatusCode(code, new ErrorResponse("Fitment years must be between 1900 and 3000."));
+                        }
+
+                        if (hasStart && fitment.YearStart!.Value > fitment.YearEnd!.Value)
+                        {
+                            code = 400;
+                            return StatusCode(code, new ErrorResponse("Fitment start year cannot be after the end year."));
+                        }
+                    }
+
+                    if (model.Fitments
+                        .GroupBy(fitment => new { fitment.MakeId, fitment.YearStart, fitment.YearEnd })
+                        .Any(group => group.Count() > 1))
+                    {
+                        code = 400;
+                        return StatusCode(code, new ErrorResponse("Duplicate fitments are not allowed."));
+                    }
                 }
 
                 // Validate manual fields only (high ROI)
@@ -647,8 +760,13 @@ namespace Site_2024.Web.Api.Controllers
                 bool shouldSyncProductDetails =
                     model.Quantity.HasValue ||
                     model.Price.HasValue ||
+                    model.Name != null ||
+                    model.PartNumber != null ||
                     model.Description != null ||
-                    model.ConditionId.HasValue;
+                    model.ConditionId.HasValue ||
+                    model.Categories != null ||
+                    model.Fitments != null ||
+                    model.Year != null;
 
                 if (shouldSyncProductDetails || model.ShippingPolicyId.HasValue)
                 {
@@ -719,7 +837,7 @@ namespace Site_2024.Web.Api.Controllers
             catch (Exception ex) when (IsFkViolation(ex))
             {
                 code = 400;
-                response = new ErrorResponse("Invalid LocationId or AvailableId.");
+                response = new ErrorResponse("One or more referenced IDs are invalid (category, make/model, location, availability, condition, or shipping policy).");
             }
             catch (Exception ex)
             {
@@ -740,11 +858,16 @@ namespace Site_2024.Web.Api.Controllers
                 || m.LocationId.HasValue
                 || m.ConditionId.HasValue
                 || m.ShippingPolicyId.HasValue
-                || !string.IsNullOrWhiteSpace(m.Description)
+                || m.Name != null
+                || m.PartNumber != null
+                || m.Brand != null
+                || m.Description != null
                 || !string.IsNullOrWhiteSpace(m.Image)
-                || !string.IsNullOrWhiteSpace(m.OtherBox)
-                || !string.IsNullOrWhiteSpace(m.AdminNotes)
-                || !string.IsNullOrWhiteSpace(m.Year);
+                || m.OtherBox != null
+                || m.AdminNotes != null
+                || m.Year != null
+                || m.Categories != null
+                || m.Fitments != null;
 
         }
 

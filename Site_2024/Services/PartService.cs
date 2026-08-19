@@ -1,7 +1,8 @@
-﻿using Site_2024.Web.Api.Interfaces;
+using Site_2024.Web.Api.Interfaces;
 using Site_2024.Web.Api.Models;
 using System.Data;
 using System.Linq;
+using System.Text.Json;
 using Site_2024.Web.Api.Extensions;
 using System.Data.SqlClient;
 using Site_2024.Web.Api.Constructors;
@@ -345,6 +346,21 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@q", (object?)model.q ?? DBNull.Value);
                     col.AddWithValue("@CatagoryId", (object?)model.CatagoryId ?? DBNull.Value);
+
+                    string categoryIdsCsv = string.Join(",",
+                        (model.CategoryIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct());
+                    string conditionIdsCsv = string.Join(",",
+                        (model.ConditionIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct());
+
+                    col.AddWithValue("@CategoryIdsCsv",
+                        string.IsNullOrWhiteSpace(categoryIdsCsv) ? DBNull.Value : categoryIdsCsv);
+                    col.AddWithValue("@ConditionIdsCsv",
+                        string.IsNullOrWhiteSpace(conditionIdsCsv) ? DBNull.Value : conditionIdsCsv);
+
                     col.AddWithValue("@MakeId", (object?)model.MakeId ?? DBNull.Value);
                     col.AddWithValue("@ModelId", (object?)model.ModelId ?? DBNull.Value);
                     col.AddWithValue("@Year", (object?)model.Year ?? DBNull.Value);
@@ -379,6 +395,21 @@ namespace Site_2024.Web.Api.Services
                 {
                     col.AddWithValue("@q", (object?)model.q ?? DBNull.Value);
                     col.AddWithValue("@CatagoryId", (object?)model.CatagoryId ?? DBNull.Value);
+
+                    string categoryIdsCsv = string.Join(",",
+                        (model.CategoryIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct());
+                    string conditionIdsCsv = string.Join(",",
+                        (model.ConditionIds ?? new List<int>())
+                            .Where(id => id > 0)
+                            .Distinct());
+
+                    col.AddWithValue("@CategoryIdsCsv",
+                        string.IsNullOrWhiteSpace(categoryIdsCsv) ? DBNull.Value : categoryIdsCsv);
+                    col.AddWithValue("@ConditionIdsCsv",
+                        string.IsNullOrWhiteSpace(conditionIdsCsv) ? DBNull.Value : conditionIdsCsv);
+
                     col.AddWithValue("@MakeId", (object?)model.MakeId ?? DBNull.Value);
                     col.AddWithValue("@ModelId", (object?)model.ModelId ?? DBNull.Value);
                     col.AddWithValue("@Year", (object?)model.Year ?? DBNull.Value);
@@ -452,11 +483,30 @@ namespace Site_2024.Web.Api.Services
 
         public void PatchPart(int id, PartPatchRequest model, int userId)
         {
-            const string procName = "[dbo].[Parts_UpdatePartial]";
+            const string procName = "[dbo].[Parts_AdminPatch]";
+
+            string? categoriesJson = model.Categories == null
+                ? null
+                : JsonSerializer.Serialize(model.Categories.Select(category => new
+                {
+                    category.CatagoryId
+                }));
+
+            string? fitmentsJson = model.Fitments == null
+                ? null
+                : JsonSerializer.Serialize(model.Fitments.Select(fitment => new
+                {
+                    fitment.MakeId,
+                    fitment.YearStart,
+                    fitment.YearEnd
+                }));
 
             _data.ExecuteNonQuery(procName, col =>
             {
                 col.Add("@Id", SqlDbType.Int).Value = id;
+                col.Add("@Name", SqlDbType.NVarChar, 128).Value = (object?)model.Name ?? DBNull.Value;
+                col.Add("@PartNumber", SqlDbType.NVarChar, 128).Value = (object?)model.PartNumber ?? DBNull.Value;
+                col.Add("@Brand", SqlDbType.NVarChar, 128).Value = (object?)model.Brand ?? DBNull.Value;
 
                 SqlParameter pPrice = col.Add("@Price", SqlDbType.Decimal);
                 pPrice.Precision = 18;
@@ -468,11 +518,14 @@ namespace Site_2024.Web.Api.Services
                 col.Add("@Image", SqlDbType.NVarChar, 260).Value = (object?)model.Image ?? DBNull.Value;
                 col.Add("@Quantity", SqlDbType.Int).Value = (object?)model.Quantity ?? DBNull.Value;
                 col.Add("@LocationId", SqlDbType.Int).Value = (object?)model.LocationId ?? DBNull.Value;
-                col.Add("@shippingPolicyId", SqlDbType.Int).Value = (object?)model.ShippingPolicyId ?? DBNull.Value;
+                col.Add("@ShippingPolicyId", SqlDbType.Int).Value = (object?)model.ShippingPolicyId ?? DBNull.Value;
                 col.Add("@OtherBox", SqlDbType.NVarChar, 100).Value = (object?)model.OtherBox ?? DBNull.Value;
                 col.Add("@AdminNotes", SqlDbType.NVarChar, 2000).Value = (object?)model.AdminNotes ?? DBNull.Value;
+                col.Add("@Year", SqlDbType.NVarChar, 50).Value = (object?)model.Year ?? DBNull.Value;
                 col.Add("@ConditionId", SqlDbType.Int).Value = (object?)model.ConditionId ?? DBNull.Value;
-                col.Add("@LastMovedBy", SqlDbType.Int).Value = userId;
+                col.Add("@CategoriesJson", SqlDbType.NVarChar, -1).Value = (object?)categoriesJson ?? DBNull.Value;
+                col.Add("@FitmentsJson", SqlDbType.NVarChar, -1).Value = (object?)fitmentsJson ?? DBNull.Value;
+                col.Add("@ChangedByUserId", SqlDbType.Int).Value = userId;
             });
         }
         public void UpdateShopifyIds(int partId, long shopifyProductId, long shopifyVariantId, long shopifyInventoryItemId)
@@ -515,6 +568,7 @@ namespace Site_2024.Web.Api.Services
             col.AddWithValue("@makeId", model.MakeId);
             col.AddWithValue("@year", (object?)model.Year ?? DBNull.Value);
             col.AddWithValue("@partnumber", model.PartNumber);
+            col.AddWithValue("@Brand", (object?)model.Brand ?? DBNull.Value);
             col.AddWithValue("@catagoryId", model.CatagoryId);
             col.AddWithValue("@description", model.Description);
             col.AddWithValue("@price", model.Price);
@@ -557,6 +611,7 @@ namespace Site_2024.Web.Api.Services
             part.Make.Model.Name = reader.GetSafeString(startingIndex++);
             part.Year = reader.GetSafeString(startingIndex++);
             part.PartNumber = reader.GetSafeString(startingIndex++);
+            part.Brand = reader.GetSafeString(startingIndex++);
             part.Description = reader.GetSafeString(startingIndex++);
             part.Price = reader.GetSafeDecimal(startingIndex++);
             part.Quantity = reader.GetSafeInt32(startingIndex++);
@@ -622,6 +677,7 @@ namespace Site_2024.Web.Api.Services
             part.Make.Model.Name = reader.GetSafeString(startingIndex++);
             part.Year = reader.GetSafeString(startingIndex++);
             part.PartNumber = reader.GetSafeString(startingIndex++);
+            part.Brand = reader.GetSafeString(startingIndex++);
             part.Description = reader.GetSafeString(startingIndex++);
             part.Price = reader.GetSafeDecimal(startingIndex++);
             part.Quantity = reader.GetSafeInt32(startingIndex++);

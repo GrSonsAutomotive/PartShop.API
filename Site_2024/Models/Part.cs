@@ -11,6 +11,7 @@ namespace Site_2024.Web.Api.Models
         public Make Make { get; set; }
         public string Year { get; set; }
         public string PartNumber {  get; set; }
+        public string? Brand { get; set; }
         public string Description { get; set; }
         public decimal Price { get; set; }
         public int Quantity { get; set; }
