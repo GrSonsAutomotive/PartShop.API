@@ -817,6 +817,14 @@ namespace Site_2024.Web.Api.Controllers
                                     .SyncShippingProfileForPartAsync(id);
                             }
 
+                            // Shipping-only changes still need to refresh the Shopify
+                            // shipping-class tag. Product-detail sync below covers
+                            // the cases that also changed other product fields.
+                            if (model.ShippingPolicyId.HasValue && !shouldSyncProductDetails)
+                            {
+                                await _shopifyAdminService.SyncProductTagsForPartAsync(updatedPart!);
+                            }
+
                             ShopifyProductInventorySyncResult? shopifyResult = null;
 
                             if (shouldSyncProductDetails &&

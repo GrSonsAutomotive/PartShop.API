@@ -60,6 +60,12 @@ namespace Site_2024.Web.Api.Services
                     policy.AllowsOnlineCheckout = reader.GetSafeBool(i++);
                     policy.DateCreated = reader.GetSafeDateTime(i++);
                     policy.DateModified = reader.GetSafeDateTime(i++);
+                    // The collection column is appended by the Markets migration.
+                    // Keep supporting databases where that migration is pending.
+                    if (reader.FieldCount > i)
+                    {
+                        policy.ShopifyShippingCollectionGid = reader.GetSafeString(i++);
+                    }
 
                     list ??= new List<ShippingPolicy>();
                     list.Add(policy);

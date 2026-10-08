@@ -5,6 +5,7 @@ namespace Site_2024.Web.Api.Models
         public int Id { get; set; }
         public string Name { get; set; }
         public long? ShopifyProfileId { get; set; }
+        public string? ShopifyShippingCollectionGid { get; set; }
         public bool IsActive { get; set; }
         public bool AllowsOnlineCheckout { get; set; } = true;
         public DateTime DateCreated { get; set; }
