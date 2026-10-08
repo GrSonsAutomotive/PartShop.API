@@ -58,6 +58,36 @@ namespace Site_2024.Web.Api.Controllers
             return StatusCode(code, response);
         }
 
+        // Uses only local SQL. Safe to call before connecting a Shopify test store.
+        [HttpGet("shopify/markets-plan")]
+        [Authorize(Policy = "AdminAction")]
+        public ActionResult<ItemResponse<object>> GetMarketsShippingPlan()
+        {
+            List<ShippingPolicy> policies = _service.GetAll() ?? new List<ShippingPolicy>();
+
+            var checkoutPolicies = policies.Where(policy => policy.AllowsOnlineCheckout).ToArray();
+            var response = new
+            {
+                TotalActivePolicies = policies.Count,
+                CheckoutEnabledPolicies = checkoutPolicies.Length,
+                MissingCollectionMappings = checkoutPolicies.Count(
+                    policy => string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid)),
+                Policies = policies.Select(policy => new
+                {
+                    policy.Id,
+                    policy.Name,
+                    policy.AllowsOnlineCheckout,
+                    policy.ShopifyProfileId,
+                    policy.ShopifyShippingCollectionGid,
+                    ShippingClassTag = policy.AllowsOnlineCheckout
+                        ? $"ShippingClass_{policy.Id}"
+                        : null
+                }).ToArray()
+            };
+
+            return Ok(new ItemResponse<object> { Item = response });
+        }
+
         [HttpGet("shopify/mode")]
         [Authorize(Policy = "AdminAction")]
         public async Task<ActionResult<ItemResponse<bool>>> GetShopifyShippingMode(
