@@ -9,6 +9,7 @@ using Site_2024.Web.Api.Responses;
 using Site_2024.Web.Api.Services;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Site_2024.Web.Api.Controllers
 {
@@ -71,6 +72,44 @@ namespace Site_2024.Web.Api.Controllers
             {
                 Logger.LogError(ex, "Failed to detect Shopify market-driven shipping mode.");
                 return StatusCode(502, new ErrorResponse("Unable to determine Shopify shipping mode."));
+            }
+        }
+
+        [HttpPost("{id:int}/shopify-collection")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyCollectionCreateResult>>> CreateShippingCollection(
+            int id,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            ShippingPolicy? policy = _service.GetAll().FirstOrDefault(item => item.Id == id);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Active shipping policy was not found."));
+
+            if (!policy.AllowsOnlineCheckout)
+                return BadRequest(new ErrorResponse("Contact-only policies must not have a checkout collection."));
+
+            if (!string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                return Conflict(new ErrorResponse("Shipping policy already has a mapped Shopify collection."));
+
+            try
+            {
+                if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse("Configure shipping collections on a market-driven Shopify test store."));
+
+                ShopifyCollectionCreateResult result =
+                    await shopifyAdminService.CreateAutomatedShippingCollectionAsync(policy);
+
+                // Persist only after Shopify confirms creation. Failed saves require
+                // reconciling the created collection before retrying, not blind recreation.
+                _service.UpdateShopifyShippingCollectionGid(id, result.CollectionGid);
+
+                return Ok(new ItemResponse<ShopifyCollectionCreateResult> { Item = result });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to provision Shopify shipping collection for policy {PolicyId}.", id);
+                return StatusCode(502, new ErrorResponse(
+                    "Shipping collection setup failed. Check logs and existing Shopify collections before retrying."));
             }
         }
 

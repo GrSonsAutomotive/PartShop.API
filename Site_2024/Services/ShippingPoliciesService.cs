@@ -74,6 +74,20 @@ namespace Site_2024.Web.Api.Services
             return list;
         }
 
+        public void UpdateShopifyShippingCollectionGid(int id, string collectionGid)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid))
+                throw new ArgumentException("A Shopify collection GID is required.", nameof(collectionGid));
+
+            _data.ExecuteNonQuery(
+                "[dbo].[ShippingPolicies_UpdateShopifyShippingCollectionGid]",
+                inputParamMapper: col =>
+                {
+                    col.AddWithValue("@Id", id);
+                    col.AddWithValue("@ShopifyShippingCollectionGid", collectionGid);
+                });
+        }
+
         public void UpdateShopifyProfileId(int id, long shopifyProfileId)
         {
             _data.ExecuteNonQuery(

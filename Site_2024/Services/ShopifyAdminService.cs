@@ -141,6 +141,92 @@ query GetMarketDrivenShippingFeature {
                 .GetBoolean();
         }
 
+        // Provision only when explicitly requested by an administrator.
+        // The merchant still configures shipping rates against this collection in Markets.
+        public async Task<ShopifyCollectionCreateResult> CreateAutomatedShippingCollectionAsync(ShippingPolicy policy)
+        {
+            if (policy == null || policy.Id <= 0 || !policy.IsActive || !policy.AllowsOnlineCheckout)
+                throw new ArgumentException("An active, checkout-enabled shipping policy is required.", nameof(policy));
+
+            string shippingTag = $"ShippingClass_{policy.Id}";
+            string title = $"[SHIPPING] Site_2024 - {policy.Name}";
+            string handle = $"site-shipping-class-{policy.Id}";
+
+            const string mutation = @"
+mutation CreateSiteShippingCollection($collection: CollectionCreateInput!) {
+  collectionCreate(collection: $collection) {
+    collection {
+      id
+      title
+      handle
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}";
+
+            var variables = new
+            {
+                collection = new
+                {
+                    title,
+                    handle,
+                    sources = new[]
+                    {
+                        new
+                        {
+                            source = new
+                            {
+                                title = $"Shipping class {policy.Id}",
+                                inclusion = new
+                                {
+                                    matchType = "ALL",
+                                    conditions = new[]
+                                    {
+                                        new
+                                        {
+                                            productTag = new
+                                            {
+                                                relation = "TAGGED_WITH",
+                                                values = new[] { shippingTag },
+                                                matchType = "ANY"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables, "2026-07");
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping collection creation failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionCreate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify shipping collection creation failed");
+
+            JsonElement created = payload.GetProperty("collection");
+            if (created.ValueKind == JsonValueKind.Null)
+                throw new ApplicationException("Shopify returned no shipping collection.");
+
+            string gid = created.GetProperty("id").GetString() ?? string.Empty;
+            if (!gid.StartsWith("gid://shopify/Collection/", StringComparison.Ordinal))
+                throw new ApplicationException("Shopify returned an invalid collection identifier.");
+
+            return new ShopifyCollectionCreateResult
+            {
+                CollectionGid = gid,
+                Title = created.GetProperty("title").GetString() ?? title,
+                Handle = created.GetProperty("handle").GetString() ?? handle
+            };
+        }
+
         public async Task<List<ShopifyDeliveryProfileResult>> GetDeliveryProfilesAsync()
         {
             string query = @"
