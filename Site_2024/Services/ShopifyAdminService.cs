@@ -13,22 +13,31 @@ namespace Site_2024.Web.Api.Services
     {
         private readonly HttpClient _httpClient;
         private readonly IShopifyTokenService _tokenService;
+        private readonly IShippingPoliciesService _shippingPoliciesService;
         private readonly ShopifySettings _settings;
         private readonly ILogger<ShopifyAdminService> _logger;
 
         public ShopifyAdminService(
             HttpClient httpClient,
             IShopifyTokenService tokenService,
+            IShippingPoliciesService shippingPoliciesService,
             IOptions<ShopifySettings> settings,
             ILogger<ShopifyAdminService> logger)
         {
             _httpClient = httpClient;
             _tokenService = tokenService;
+            _shippingPoliciesService = shippingPoliciesService;
             _settings = settings.Value;
             _logger = logger;
         }
+
         public async Task<ShopifyCreateProductResult> CreateProductForPartAsync(Part part)
         {
+            // Fail before creating a Shopify product or persisting its IDs when
+            // Market-driven Shipping rates have not been approved for this policy.
+            // All creation paths, including Swagger test endpoints, pass here.
+            await EnsureShippingReadyBeforeProductCreateAsync(part);
+
             string mutation = @"
 mutation CreateSitePartProduct($product: ProductCreateInput!) {
   productCreate(product: $product) {
@@ -111,6 +120,44 @@ mutation CreateSitePartProduct($product: ProductCreateInput!) {
                 VariantId = ExtractNumericId(variantGid),
                 InventoryItemId = ExtractNumericId(inventoryItemGid)
             };
+        }
+
+        private async Task EnsureShippingReadyBeforeProductCreateAsync(Part part)
+        {
+            if (part == null)
+                throw new ArgumentNullException(nameof(part));
+
+            // Contact-only parts are created as non-checkout listings and are
+            // unpublished by the normal sync workflow; no shipping rate applies.
+            if (part.ShippingPolicy?.AllowsOnlineCheckout == false)
+                return;
+
+            if (part.ShippingPolicy == null)
+                throw new ApplicationException("Part has no shipping policy. Shopify product was not created.");
+
+            // Leave the legacy delivery-profile workflow unchanged.
+            if (!await UsesMarketDrivenShippingAsync())
+                return;
+
+            if (!_settings.AllowMarketDrivenShippingPublishing)
+            {
+                throw new ApplicationException(
+                    "Market-driven shipping is active, but rate verification has not been approved. " +
+                    "Shopify product creation is blocked until Shopify Markets rates are validated.");
+            }
+
+            ShippingPolicy? policy = _shippingPoliciesService.GetAll()
+                .FirstOrDefault(item => item.Id == part.ShippingPolicy.Id);
+
+            if (policy == null || !policy.AllowsOnlineCheckout)
+                throw new ApplicationException("Part shipping policy is not active or checkout-enabled. Shopify product was not created.");
+
+            if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+            {
+                throw new ApplicationException(
+                    $"Shipping policy '{policy.Name}' is not mapped to a Shopify Markets collection. " +
+                    "Shopify product was not created.");
+            }
         }
 
         // Read-only capability probe for the 2026-07+ Markets shipping API.
