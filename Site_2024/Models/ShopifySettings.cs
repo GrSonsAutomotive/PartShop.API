@@ -6,6 +6,10 @@ namespace Site_2024.Web.Api.Models
         public string ClientId { get; set; } = string.Empty;
         public string ClientSecret { get; set; } = string.Empty;
         public string ApiVersion { get; set; } = "2026-04";
+
+        // OFF by default. This does not create Markets rates or migrate Shopify
+        // settings. Enable only after a separate Markets test-store validation.
+        public bool AllowMarketDrivenShippingPublishing { get; set; } = false;
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";
