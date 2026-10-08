@@ -9,6 +9,7 @@ namespace Site_2024.Web.Api.Services
         Task<ShopifyCreateProductResult> CreateProductForPartAsync(Part part);
         Task<List<ShopifyLocationResult>> GetLocationsAsync();
         Task<List<ShopifyDeliveryProfileResult>> GetDeliveryProfilesAsync();
+        Task<bool> UsesMarketDrivenShippingAsync();
         Task AssignVariantToDeliveryProfileAsync(long variantId, long deliveryProfileId);
         Task<ShopifyProductInventorySyncResult> SyncProductDetailsForPartAsync(Part part);
         Task SyncProductTagsForPartAsync(Part part);

@@ -113,6 +113,34 @@ mutation CreateSitePartProduct($product: ProductCreateInput!) {
             };
         }
 
+        // Read-only capability probe for the 2026-07+ Markets shipping API.
+        // This deliberately leaves the existing configured API version unchanged.
+        public async Task<bool> UsesMarketDrivenShippingAsync()
+        {
+            const string query = @"
+query GetMarketDrivenShippingFeature {
+  shop {
+    features {
+      marketDrivenShipping
+    }
+  }
+}";
+
+            using JsonDocument doc = await SendGraphQlAsync(query, new { }, "2026-07");
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement errors))
+            {
+                throw new ApplicationException($"Shopify market-driven shipping query failed: {errors}");
+            }
+
+            return root.GetProperty("data")
+                .GetProperty("shop")
+                .GetProperty("features")
+                .GetProperty("marketDrivenShipping")
+                .GetBoolean();
+        }
+
         public async Task<List<ShopifyDeliveryProfileResult>> GetDeliveryProfilesAsync()
         {
             string query = @"
@@ -1401,10 +1429,10 @@ mutation SetRefundInventoryQuantity(
             return result;
         }
 
-        private async Task<JsonDocument> SendGraphQlAsync(string query, object variables)
+        private async Task<JsonDocument> SendGraphQlAsync(string query, object variables, string? apiVersionOverride = null)
         {
             string shopDomain = NormalizeShopDomain(_settings.ShopDomain);
-            string endpoint = $"https://{shopDomain}/admin/api/{_settings.ApiVersion}/graphql.json";
+            string endpoint = $"https://{shopDomain}/admin/api/{apiVersionOverride ?? _settings.ApiVersion}/graphql.json";
             string token = await _tokenService.GetAccessTokenAsync();
 
             var body = new

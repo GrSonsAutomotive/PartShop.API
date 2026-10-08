@@ -57,6 +57,23 @@ namespace Site_2024.Web.Api.Controllers
             return StatusCode(code, response);
         }
 
+        [HttpGet("shopify/mode")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<bool>>> GetShopifyShippingMode(
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            try
+            {
+                bool enabled = await shopifyAdminService.UsesMarketDrivenShippingAsync();
+                return Ok(new ItemResponse<bool> { Item = enabled });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to detect Shopify market-driven shipping mode.");
+                return StatusCode(502, new ErrorResponse("Unable to determine Shopify shipping mode."));
+            }
+        }
+
         [HttpGet("shopify/profiles")]
         [Authorize(Policy = "AdminAction")]
         public async Task<ActionResult<ItemResponse<List<Site_2024.Web.Api.Models.Shopify.ShopifyDeliveryProfileResult>>>> GetShopifyProfiles(
