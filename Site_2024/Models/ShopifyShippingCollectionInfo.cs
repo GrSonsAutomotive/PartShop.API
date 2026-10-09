@@ -20,6 +20,10 @@ namespace Site_2024.Web.Api.Models
         public string Title { get; set; } = string.Empty;
         public string SourceType { get; set; } = string.Empty;
         public string InclusionMatchType { get; set; } = string.Empty;
+        public string TargetType { get; set; } = string.Empty;
+        public int InclusionConditionCount { get; set; }
+        public bool HasExplicitSelections { get; set; }
+        public bool HasExclusions { get; set; }
         public List<ShopifyShippingCollectionTagCondition> TagConditions { get; set; } = new();
     }
 
