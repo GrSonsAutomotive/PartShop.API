@@ -11,6 +11,8 @@ namespace Site_2024.Web.Api.Services
         Task<List<ShopifyDeliveryProfileResult>> GetDeliveryProfilesAsync();
         Task<bool> UsesMarketDrivenShippingAsync();
         Task<ShopifyCollectionCreateResult> CreateAutomatedShippingCollectionAsync(ShippingPolicy policy);
+        Task<ShopifyShippingCollectionPage> GetShippingCollectionsAsync(string? after);
+        Task<ShopifyShippingCollectionInfo?> GetShippingCollectionAsync(string collectionGid);
         Task AssignVariantToDeliveryProfileAsync(long variantId, long deliveryProfileId);
         Task<ShopifyProductInventorySyncResult> SyncProductDetailsForPartAsync(Part part);
         Task SyncProductTagsForPartAsync(Part part);

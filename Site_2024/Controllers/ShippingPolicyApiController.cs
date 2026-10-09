@@ -143,6 +143,127 @@ namespace Site_2024.Web.Api.Controllers
             }
         }
 
+
+        // Read-only Shopify inspection; lists collections in pages of up to 50.
+        [HttpGet("shopify/collections")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingCollectionPage>>> ListShopifyCollections(
+            [FromQuery] string? after,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            try
+            {
+                ShopifyShippingCollectionPage page =
+                    await shopifyAdminService.GetShippingCollectionsAsync(after);
+                return Ok(new ItemResponse<ShopifyShippingCollectionPage> { Item = page });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to list Shopify collections.");
+                return StatusCode(502, new ErrorResponse("Unable to inspect Shopify collections."));
+            }
+        }
+
+        // Read-only inspection of one Shopify collection and its source conditions.
+        [HttpGet("shopify/collection")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingCollectionInfo>>> InspectShopifyCollection(
+            [FromQuery] string collectionGid,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid))
+                return BadRequest(new ErrorResponse("A Shopify collection GID is required."));
+
+            try
+            {
+                ShopifyShippingCollectionInfo? collection =
+                    await shopifyAdminService.GetShippingCollectionAsync(collectionGid);
+                if (collection == null)
+                    return NotFound(new ErrorResponse("Collection not found in the connected Shopify store."));
+
+                return Ok(new ItemResponse<ShopifyShippingCollectionInfo> { Item = collection });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to inspect Shopify collection.");
+                return StatusCode(502, new ErrorResponse("Unable to inspect Shopify collection."));
+            }
+        }
+
+        // Adopt a Shopify-created collection; never create or modify a collection here.
+        // Collection source updates are a separate, explicitly verified operation.
+        [HttpPost("{id:int}/shopify-collection/adopt")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingCollectionInfo>>> AdoptShippingCollection(
+            int id,
+            [FromBody] ShopifyShippingCollectionAdoptionRequest request,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.CollectionGid)
+                || string.IsNullOrWhiteSpace(request.ExpectedTitle))
+                return BadRequest(new ErrorResponse("CollectionGid and ExpectedTitle are required."));
+
+            List<ShippingPolicy> policies = _service.GetAll() ?? new();
+            ShippingPolicy? policy = policies.FirstOrDefault(item => item.Id == id);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Active shipping policy not found."));
+            if (!policy.AllowsOnlineCheckout)
+                return BadRequest(new ErrorResponse("Contact-only shipping policies cannot be mapped."));
+
+            // Never overwrite an existing mapping or reuse a collection assigned to
+            // another policy. A repeated request for an existing mapping is safe.
+            string gid = request.CollectionGid.Trim();
+            if (!string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid)
+                && !string.Equals(policy.ShopifyShippingCollectionGid, gid, StringComparison.Ordinal))
+                return Conflict(new ErrorResponse("Policy already has a different mapped collection."));
+
+            if (policies.Any(other => other.Id != id
+                && string.Equals(other.ShopifyShippingCollectionGid, gid, StringComparison.Ordinal)))
+                return Conflict(new ErrorResponse("Collection is already mapped to another shipping policy."));
+
+            try
+            {
+                if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse("Collection adoption requires Market-driven Shipping."));
+
+                ShopifyShippingCollectionInfo? collection =
+                    await shopifyAdminService.GetShippingCollectionAsync(gid);
+                if (collection == null)
+                    return NotFound(new ErrorResponse("Collection not found in the connected Shopify store."));
+
+                if (!string.Equals(collection.Title, request.ExpectedTitle.Trim(), StringComparison.Ordinal))
+                    return Conflict(new ErrorResponse("Shopify collection title differs from ExpectedTitle. Reinspect before adopting."));
+
+                if (!collection.Title.EndsWith(policy.Name, StringComparison.OrdinalIgnoreCase))
+                    return Conflict(new ErrorResponse("Collection title does not match the local shipping policy name."));
+
+                string expectedTag = $"ShippingClass_{id}";
+                if (collection.ShippingClassTags.Any(tag =>
+                        !string.Equals(tag, expectedTag, StringComparison.OrdinalIgnoreCase)))
+                    return Conflict(new ErrorResponse("Collection has another shipping-class tag condition; review membership before adopting."));
+
+                if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                    _service.UpdateShopifyShippingCollectionGid(id, gid);
+
+                // Mapping a collection is not proof that its new-product tag
+                // membership source is configured. Verify that separately.
+                return Ok(new ItemResponse<ShopifyShippingCollectionInfo> { Item = collection });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to adopt Shopify collection for policy {PolicyId}.", id);
+                return StatusCode(502, new ErrorResponse("Unable to adopt Shopify collection; verify the store and SQL state."));
+            }
+        }
+
         [HttpGet("shopify/profiles")]
         [Authorize(Policy = "AdminAction")]
         public async Task<ActionResult<ItemResponse<List<Site_2024.Web.Api.Models.Shopify.ShopifyDeliveryProfileResult>>>> GetShopifyProfiles(

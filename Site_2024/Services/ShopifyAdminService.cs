@@ -160,6 +160,163 @@ mutation CreateSitePartProduct($product: ProductCreateInput!) {
             }
         }
 
+
+        // The new collections model exists on API 2026-07+. We use it only
+        // for discovery here; listing sources never modifies collection membership.
+        private const string ShippingCollectionFields = @"
+fragment SiteShippingCollectionFields on Collection {
+  id
+  title
+  handle
+  productsCount { count }
+  sources {
+    __typename
+    id
+    title
+    ... on CollectionConditionsSource {
+      inclusion {
+        matchType
+        conditions {
+          __typename
+          id
+          ... on CollectionSourceInclusionConditionProductTag {
+            relation
+            values
+            matchType
+          }
+        }
+      }
+    }
+  }
+}";
+
+        public async Task<ShopifyShippingCollectionPage> GetShippingCollectionsAsync(string? after)
+        {
+            const string query = @"
+query SiteShippingCollections($after: String) {
+  collections(first: 50, after: $after) {
+    nodes { ...SiteShippingCollectionFields }
+    pageInfo { hasNextPage endCursor }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query + ShippingCollectionFields,
+                new { after = string.IsNullOrWhiteSpace(after) ? null : after.Trim() },
+                "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping collection list failed: {errors}");
+
+            JsonElement connection = root.GetProperty("data").GetProperty("collections");
+            JsonElement pageInfo = connection.GetProperty("pageInfo");
+
+            ShopifyShippingCollectionPage result = new()
+            {
+                HasNextPage = pageInfo.GetProperty("hasNextPage").GetBoolean(),
+                EndCursor = pageInfo.TryGetProperty("endCursor", out JsonElement cursor)
+                    && cursor.ValueKind == JsonValueKind.String
+                    ? cursor.GetString()
+                    : null
+            };
+
+            foreach (JsonElement node in connection.GetProperty("nodes").EnumerateArray())
+                result.Collections.Add(MapShippingCollection(node));
+
+            return result;
+        }
+
+        public async Task<ShopifyShippingCollectionInfo?> GetShippingCollectionAsync(string collectionGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("A valid Shopify Collection GID is required.", nameof(collectionGid));
+
+            const string query = @"
+query SiteShippingCollection($id: ID!) {
+  collection(id: $id) { ...SiteShippingCollectionFields }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query + ShippingCollectionFields, new { id = collectionGid }, "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping collection lookup failed: {errors}");
+
+            JsonElement collection = root.GetProperty("data").GetProperty("collection");
+            return collection.ValueKind == JsonValueKind.Null
+                ? null
+                : MapShippingCollection(collection);
+        }
+
+        private static bool IsValidCollectionGid(string? gid)
+        {
+            const string prefix = "gid://shopify/Collection/";
+            return gid != null
+                && gid.StartsWith(prefix, StringComparison.Ordinal)
+                && gid.Length > prefix.Length
+                && gid[prefix.Length..].All(char.IsDigit);
+        }
+
+        private static ShopifyShippingCollectionInfo MapShippingCollection(JsonElement node)
+        {
+            ShopifyShippingCollectionInfo result = new()
+            {
+                CollectionGid = node.GetProperty("id").GetString() ?? string.Empty,
+                Title = node.GetProperty("title").GetString() ?? string.Empty,
+                Handle = node.GetProperty("handle").GetString() ?? string.Empty,
+                ProductCount = node.GetProperty("productsCount").GetProperty("count").GetInt32()
+            };
+
+            foreach (JsonElement source in node.GetProperty("sources").EnumerateArray())
+            {
+                ShopifyShippingCollectionSourceInfo sourceInfo = new()
+                {
+                    SourceGid = source.GetProperty("id").GetString() ?? string.Empty,
+                    SourceType = source.GetProperty("__typename").GetString() ?? string.Empty,
+                    Title = source.GetProperty("title").GetString() ?? string.Empty
+                };
+
+                if (source.TryGetProperty("inclusion", out JsonElement inclusion)
+                    && inclusion.ValueKind == JsonValueKind.Object)
+                {
+                    sourceInfo.InclusionMatchType =
+                        inclusion.GetProperty("matchType").GetString() ?? string.Empty;
+
+                    foreach (JsonElement condition in inclusion.GetProperty("conditions").EnumerateArray())
+                    {
+                        if (!condition.TryGetProperty("values", out JsonElement values)
+                            || values.ValueKind != JsonValueKind.Array)
+                            continue;
+
+                        ShopifyShippingCollectionTagCondition tag = new()
+                        {
+                            Relation = condition.GetProperty("relation").GetString() ?? string.Empty,
+                            MatchType = condition.GetProperty("matchType").GetString() ?? string.Empty
+                        };
+                        foreach (JsonElement value in values.EnumerateArray())
+                        {
+                            if (value.ValueKind == JsonValueKind.String)
+                                tag.Values.Add(value.GetString() ?? string.Empty);
+                        }
+                        sourceInfo.TagConditions.Add(tag);
+                    }
+                }
+
+                result.Sources.Add(sourceInfo);
+            }
+
+            result.ShippingClassTags = result.Sources
+                .SelectMany(source => source.TagConditions)
+                .Where(condition => condition.Relation == "TAGGED_WITH")
+                .SelectMany(condition => condition.Values)
+                .Where(tag => tag.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(tag => tag, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return result;
+        }
+
         // Read-only capability probe for the 2026-07+ Markets shipping API.
         // This deliberately leaves the existing configured API version unchanged.
         public async Task<bool> UsesMarketDrivenShippingAsync()
