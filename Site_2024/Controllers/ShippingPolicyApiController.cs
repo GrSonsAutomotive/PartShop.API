@@ -413,6 +413,10 @@ namespace Site_2024.Web.Api.Controllers
             string expectedTag = $"ShippingClass_{policy.Id}";
             bool dedicated = collection.Sources.Any(source =>
                 source.SourceType == "CollectionConditionsSource"
+                && source.TargetType == "PRODUCTS"
+                && source.InclusionConditionCount == 1
+                && !source.HasExplicitSelections
+                && !source.HasExclusions
                 && source.TagConditions.Count == 1
                 && source.TagConditions[0].Relation == "TAGGED_WITH"
                 && source.TagConditions[0].MatchType == "ANY"
@@ -431,7 +435,11 @@ namespace Site_2024.Web.Api.Controllers
             bool ambiguousExpectedTag = collection.Sources
                 .Where(source => source.TagConditions.Any(condition => condition.Values.Any(value =>
                     string.Equals(value, expectedTag, StringComparison.OrdinalIgnoreCase))))
-                .Any(source => source.TagConditions.Count != 1
+                .Any(source => source.InclusionConditionCount != 1
+                    || source.HasExplicitSelections
+                    || source.HasExclusions
+                    || source.TargetType != "PRODUCTS"
+                    || source.TagConditions.Count != 1
                     || source.TagConditions[0].Values.Count != 1
                     || source.TagConditions[0].Relation != "TAGGED_WITH"
                     || source.TagConditions[0].MatchType != "ANY");
