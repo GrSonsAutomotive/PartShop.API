@@ -248,6 +248,110 @@ query SiteShippingCollection($id: ID!) {
                 : MapShippingCollection(collection);
         }
 
+
+        // Append only: no sourcesToUpdate and no sourcesToDelete fields are sent.
+        // Caller must preflight original source GIDs and verify them afterward.
+        public async Task<ShopifyCollectionSourceCreateResult> AddShippingTagSourceAsync(
+            string collectionGid, string shippingClassTag)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+            if (!shippingClassTag.StartsWith("ShippingClass_", StringComparison.Ordinal)
+                || shippingClassTag.Length <= "ShippingClass_".Length
+                || !shippingClassTag["ShippingClass_".Length..].All(char.IsDigit))
+                throw new ArgumentException("Expected a ShippingClass_<policy ID> tag.", nameof(shippingClassTag));
+
+            const string mutation = @"
+mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
+  collectionUpdate(collection: $collection) {
+    collection {
+      id
+      title
+      handle
+      productsCount { count }
+      sources {
+        __typename
+        id
+        title
+        ... on CollectionConditionsSource {
+          inclusion {
+            matchType
+            conditions {
+              __typename
+              id
+              ... on CollectionSourceInclusionConditionProductTag {
+                relation
+                values
+                matchType
+              }
+            }
+          }
+        }
+      }
+    }
+    job { id done }
+    userErrors { field message }
+  }
+}";
+            var variables = new
+            {
+                collection = new
+                {
+                    id = collectionGid,
+                    sourcesToCreate = new[]
+                    {
+                        new
+                        {
+                            source = new
+                            {
+                                title = $"Site_2024 automated shipping tag {shippingClassTag}",
+                                inclusion = new
+                                {
+                                    matchType = "ALL",
+                                    conditions = new[]
+                                    {
+                                        new
+                                        {
+                                            productTag = new
+                                            {
+                                                relation = "TAGGED_WITH",
+                                                values = new[] { shippingClassTag },
+                                                matchType = "ANY"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify collection tag source update failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionUpdate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify collection tag source update failed");
+
+            JsonElement collection = payload.GetProperty("collection");
+            if (collection.ValueKind == JsonValueKind.Null)
+                throw new ApplicationException("Shopify returned no collection after source update.");
+
+            ShopifyCollectionSourceCreateResult result = new()
+            {
+                Collection = MapShippingCollection(collection)
+            };
+            if (payload.TryGetProperty("job", out JsonElement job)
+                && job.ValueKind == JsonValueKind.Object)
+            {
+                result.JobGid = job.GetProperty("id").GetString();
+                result.JobDone = job.GetProperty("done").GetBoolean();
+            }
+            return result;
+        }
+
         private static bool IsValidCollectionGid(string? gid)
         {
             const string prefix = "gid://shopify/Collection/";

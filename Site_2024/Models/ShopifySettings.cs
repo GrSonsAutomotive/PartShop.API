@@ -10,6 +10,9 @@ namespace Site_2024.Web.Api.Models
         // OFF by default. This does not create Markets rates or migrate Shopify
         // settings. Enable only after a separate Markets test-store validation.
         public bool AllowMarketDrivenShippingPublishing { get; set; } = false;
+        // Independently gated: editing Shopify collection membership sources can
+        // affect existing products' checkout rates. Opt in per environment.
+        public bool AllowMarketDrivenShippingCollectionSourceWrites { get; set; } = false;
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";
