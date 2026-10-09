@@ -41,6 +41,29 @@ namespace Site_2024.Web.Api.Models
         public string? EndCursor { get; set; }
     }
 
+
+    // A small read-only sample, not a full inventory export. Confirms whether
+    // Shopify exposes the original products through the collection and source.
+    public class ShopifyShippingMembershipAudit
+    {
+        public string CollectionGid { get; set; } = string.Empty;
+        public string CollectionTitle { get; set; } = string.Empty;
+        public int ProductCount { get; set; }
+        public List<string> CollectionProductGids { get; set; } = new();
+        public bool MoreCollectionProducts { get; set; }
+        public List<ShopifyShippingSourceMembershipAudit> Sources { get; set; } = new();
+    }
+
+    public class ShopifyShippingSourceMembershipAudit
+    {
+        public string SourceGid { get; set; } = string.Empty;
+        public string SourceType { get; set; } = string.Empty;
+        public List<string> SourceProductGids { get; set; } = new();
+        public bool MoreSourceProducts { get; set; }
+        public List<string> ManualSelectionProductGids { get; set; } = new();
+        public bool MoreManualSelections { get; set; }
+    }
+
     public class ShopifyShippingCollectionAdoptionRequest
     {
         public string CollectionGid { get; set; } = string.Empty;

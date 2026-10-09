@@ -252,6 +252,97 @@ query SiteShippingCollection($id: ID!) {
         }
 
 
+
+        // Read-only source/member comparison for cautious migration of manual
+        // collections. Product IDs only; no customer data is queried.
+        public async Task<ShopifyShippingMembershipAudit?> AuditShippingCollectionMembershipAsync(
+            string collectionGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+
+            const string query = @"
+query SiteShippingMembershipAudit($id: ID!) {
+  collection(id: $id) {
+    id
+    title
+    productsCount { count }
+    products(first: 10) {
+      nodes { id }
+      pageInfo { hasNextPage }
+    }
+    sources {
+      __typename
+      id
+      ... on CollectionConditionsSource {
+        products(first: 10) {
+          nodes { id }
+          pageInfo { hasNextPage }
+        }
+        inclusion {
+          selections(first: 10) {
+            nodes { product { id } }
+            pageInfo { hasNextPage }
+          }
+        }
+      }
+    }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query, new { id = collectionGid }, "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify membership audit failed: {errors}");
+
+            JsonElement collection = root.GetProperty("data").GetProperty("collection");
+            if (collection.ValueKind == JsonValueKind.Null)
+                return null;
+
+            JsonElement collectionProducts = collection.GetProperty("products");
+            ShopifyShippingMembershipAudit audit = new()
+            {
+                CollectionGid = collection.GetProperty("id").GetString() ?? "",
+                CollectionTitle = collection.GetProperty("title").GetString() ?? "",
+                ProductCount = collection.GetProperty("productsCount").GetProperty("count").GetInt32(),
+                CollectionProductGids = collectionProducts.GetProperty("nodes")
+                    .EnumerateArray().Select(item => item.GetProperty("id").GetString() ?? "").ToList(),
+                MoreCollectionProducts = collectionProducts.GetProperty("pageInfo")
+                    .GetProperty("hasNextPage").GetBoolean()
+            };
+
+            foreach (JsonElement source in collection.GetProperty("sources").EnumerateArray())
+            {
+                ShopifyShippingSourceMembershipAudit sourceAudit = new()
+                {
+                    SourceGid = source.GetProperty("id").GetString() ?? "",
+                    SourceType = source.GetProperty("__typename").GetString() ?? ""
+                };
+
+                if (sourceAudit.SourceType == "CollectionConditionsSource")
+                {
+                    JsonElement products = source.GetProperty("products");
+                    sourceAudit.SourceProductGids = products.GetProperty("nodes").EnumerateArray()
+                        .Select(item => item.GetProperty("id").GetString() ?? "").ToList();
+                    sourceAudit.MoreSourceProducts = products.GetProperty("pageInfo")
+                        .GetProperty("hasNextPage").GetBoolean();
+
+                    JsonElement selections = source.GetProperty("inclusion").GetProperty("selections");
+                    sourceAudit.ManualSelectionProductGids = selections.GetProperty("nodes")
+                        .EnumerateArray()
+                        .Select(item => item.GetProperty("product").GetProperty("id").GetString() ?? "")
+                        .ToList();
+                    sourceAudit.MoreManualSelections = selections.GetProperty("pageInfo")
+                        .GetProperty("hasNextPage").GetBoolean();
+                }
+
+                audit.Sources.Add(sourceAudit);
+            }
+
+            return audit;
+        }
+
         // Append only: no sourcesToUpdate and no sourcesToDelete fields are sent.
         // Caller must preflight original source GIDs and verify them afterward.
         public async Task<ShopifyCollectionSourceCreateResult> AddShippingTagSourceAsync(

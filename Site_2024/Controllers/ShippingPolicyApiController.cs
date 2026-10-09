@@ -194,6 +194,35 @@ namespace Site_2024.Web.Api.Controllers
             }
         }
 
+
+        // Confirm existing products are visible before testing append-only rules.
+        [HttpGet("shopify/collection-membership-audit")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingMembershipAudit>>> AuditCollectionMembership(
+            [FromQuery] string collectionGid,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid))
+                return BadRequest(new ErrorResponse("A Shopify Collection GID is required."));
+            try
+            {
+                ShopifyShippingMembershipAudit? audit =
+                    await shopifyAdminService.AuditShippingCollectionMembershipAsync(collectionGid);
+                if (audit == null)
+                    return NotFound(new ErrorResponse("Shopify collection not found."));
+                return Ok(new ItemResponse<ShopifyShippingMembershipAudit> { Item = audit });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed read-only membership audit for Shopify collection.");
+                return StatusCode(502, new ErrorResponse("Unable to audit Shopify collection membership."));
+            }
+        }
+
         // Adopt a Shopify-created collection; never create or modify a collection here.
         // Collection source updates are a separate, explicitly verified operation.
         [HttpPost("{id:int}/shopify-collection/adopt")]
