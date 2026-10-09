@@ -174,8 +174,11 @@ fragment SiteShippingCollectionFields on Collection {
     id
     title
     ... on CollectionConditionsSource {
+      targetType
+      exclusion { __typename }
       inclusion {
         matchType
+        selections(first: 1) { nodes { product { id } } }
         conditions {
           __typename
           id
@@ -274,8 +277,11 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
         id
         title
         ... on CollectionConditionsSource {
+          targetType
+          exclusion { __typename }
           inclusion {
             matchType
+            selections(first: 1) { nodes { product { id } } }
             conditions {
               __typename
               id
@@ -377,7 +383,12 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
                 {
                     SourceGid = source.GetProperty("id").GetString() ?? string.Empty,
                     SourceType = source.GetProperty("__typename").GetString() ?? string.Empty,
-                    Title = source.GetProperty("title").GetString() ?? string.Empty
+                    Title = source.GetProperty("title").GetString() ?? string.Empty,
+                    TargetType = source.TryGetProperty("targetType", out JsonElement target)
+                        && target.ValueKind == JsonValueKind.String
+                        ? target.GetString() ?? string.Empty : string.Empty,
+                    HasExclusions = source.TryGetProperty("exclusion", out JsonElement exclusion)
+                        && exclusion.ValueKind != JsonValueKind.Null
                 };
 
                 if (source.TryGetProperty("inclusion", out JsonElement inclusion)
@@ -385,8 +396,12 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
                 {
                     sourceInfo.InclusionMatchType =
                         inclusion.GetProperty("matchType").GetString() ?? string.Empty;
+                    JsonElement conditions = inclusion.GetProperty("conditions");
+                    sourceInfo.InclusionConditionCount = conditions.GetArrayLength();
+                    sourceInfo.HasExplicitSelections = inclusion.TryGetProperty("selections", out JsonElement selections)
+                        && selections.GetProperty("nodes").GetArrayLength() > 0;
 
-                    foreach (JsonElement condition in inclusion.GetProperty("conditions").EnumerateArray())
+                    foreach (JsonElement condition in conditions.EnumerateArray())
                     {
                         if (!condition.TryGetProperty("values", out JsonElement values)
                             || values.ValueKind != JsonValueKind.Array)
