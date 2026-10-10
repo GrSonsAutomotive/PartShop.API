@@ -175,7 +175,10 @@ fragment SiteShippingCollectionFields on Collection {
     title
     ... on CollectionConditionsSource {
       targetType
-      exclusion { __typename }
+      exclusion {
+        conditions { __typename }
+        selections(first: 1) { nodes { product { id } } }
+      }
       inclusion {
         matchType
         selections(first: 1) { nodes { product { id } } }
@@ -369,7 +372,10 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
         title
         ... on CollectionConditionsSource {
           targetType
-          exclusion { __typename }
+          exclusion {
+        conditions { __typename }
+        selections(first: 1) { nodes { product { id } } }
+      }
           inclusion {
             matchType
             selections(first: 1) { nodes { product { id } } }
@@ -478,8 +484,13 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
                     TargetType = source.TryGetProperty("targetType", out JsonElement target)
                         && target.ValueKind == JsonValueKind.String
                         ? target.GetString() ?? string.Empty : string.Empty,
+                    // Shopify can return an empty exclusion object even when
+                    // no products are excluded. Check rules and selections,
+                    // not whether the object exists.
                     HasExclusions = source.TryGetProperty("exclusion", out JsonElement exclusion)
-                        && exclusion.ValueKind != JsonValueKind.Null
+                        && exclusion.ValueKind == JsonValueKind.Object
+                        && (exclusion.GetProperty("conditions").GetArrayLength() > 0
+                            || exclusion.GetProperty("selections").GetProperty("nodes").GetArrayLength() > 0)
                 };
 
                 if (source.TryGetProperty("inclusion", out JsonElement inclusion)
