@@ -15,6 +15,8 @@ namespace Site_2024.Web.Api.Services
         Task<ShopifyShippingCollectionInfo?> GetShippingCollectionAsync(string collectionGid);
         Task<ShopifyShippingMembershipAudit?> AuditShippingCollectionMembershipAsync(string collectionGid);
         Task<ShopifyCollectionSourceCreateResult> AddShippingTagSourceAsync(string collectionGid, string shippingClassTag);
+        Task<ShopifyShippingManualSelectionMutationResult> RemoveManualProductSelectionAsync(
+            string collectionGid, string sourceGid, string productGid);
         Task AssignVariantToDeliveryProfileAsync(long variantId, long deliveryProfileId);
         Task<ShopifyProductInventorySyncResult> SyncProductDetailsForPartAsync(Part part);
         Task SyncProductTagsForPartAsync(Part part);

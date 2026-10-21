@@ -294,6 +294,135 @@ namespace Site_2024.Web.Api.Controllers
         }
 
 
+
+        // Guarded manual-selection removal: safe for a DEV migration test, NOT
+        // an automatic part reassignment workflow. Independent setting is OFF by default.
+        [HttpPost("{id:int}/shopify-collection/remove-manual-selection")]
+        [Authorize(Policy = "PartsDelete")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingManualSelectionRemoveResult>>> RemoveManualSelection(
+            int id,
+            [FromBody] ShopifyShippingManualSelectionRemoveRequest request,
+            [FromServices] IShopifyAdminService shopifyAdminService,
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
+        {
+            if (request == null
+                || request.Confirmation != "REMOVE_MANUAL_SHIPPING_SELECTION"
+                || request.ExpectedProductCount < 0
+                || string.IsNullOrWhiteSpace(request.ExpectedTitle)
+                || string.IsNullOrWhiteSpace(request.SourceGid)
+                || string.IsNullOrWhiteSpace(request.ProductGid))
+                return BadRequest(new ErrorResponse(
+                    "ProductGid, SourceGid, ExpectedTitle, ExpectedProductCount, and confirmation REMOVE_MANUAL_SHIPPING_SELECTION are required."));
+
+            if (!shopifyOptions.Value.AllowMarketDrivenShippingCollectionMembershipWrites)
+                return Conflict(new ErrorResponse(
+                    "Shopify manual shipping collection membership writes are disabled for this environment."));
+
+            ShippingPolicy? policy = (_service.GetAll() ?? new())
+                .FirstOrDefault(item => item.Id == id && item.AllowsOnlineCheckout);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Checkout shipping policy not found."));
+            if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                return Conflict(new ErrorResponse("Policy does not have a Shopify collection mapping."));
+
+            try
+            {
+                if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse("Store does not use Market-driven Shipping."));
+
+                string collectionGid = policy.ShopifyShippingCollectionGid;
+                ShopifyShippingCollectionInfo? before =
+                    await shopifyAdminService.GetShippingCollectionAsync(collectionGid);
+                if (before == null)
+                    return NotFound(new ErrorResponse("Mapped Shopify collection not found."));
+
+                if (!string.Equals(before.Title, request.ExpectedTitle.Trim(), StringComparison.Ordinal)
+                    || before.ProductCount != request.ExpectedProductCount)
+                    return Conflict(new ErrorResponse("Collection title or product count changed; inspect before retrying."));
+
+                ShopifyShippingCollectionSourceInfo? source = before.Sources
+                    .FirstOrDefault(item => item.SourceGid == request.SourceGid);
+
+                if (source == null || source.SourceType != "CollectionConditionsSource"
+                    || source.TargetType != "PRODUCTS"
+                    || source.InclusionConditionCount != 0
+                    || source.HasExclusions
+                    || !source.HasExplicitSelections)
+                    return Conflict(new ErrorResponse(
+                        "Source is not an uncomplicated manual product-selection source. Do not modify it."));
+
+                ShopifyShippingMembershipAudit? audit =
+                    await shopifyAdminService.AuditShippingCollectionMembershipAsync(collectionGid);
+                if (audit == null || audit.ProductCount != before.ProductCount)
+                    return Conflict(new ErrorResponse("Collection changed while inspecting membership."));
+
+                ShopifyShippingSourceMembershipAudit? memberSource =
+                    audit.Sources.FirstOrDefault(item => item.SourceGid == request.SourceGid);
+                if (memberSource == null || memberSource.MoreManualSelections)
+                    return Conflict(new ErrorResponse(
+                        "Manual membership cannot be verified from this page. No changes made."));
+
+                if (!memberSource.ManualSelectionProductGids.Contains(request.ProductGid))
+                    return Conflict(new ErrorResponse(
+                        "Product is not explicitly selected in this source. No changes made."));
+
+                // Re-read just before mutation to catch source-condition changes.
+                ShopifyShippingCollectionInfo? confirm =
+                    await shopifyAdminService.GetShippingCollectionAsync(collectionGid);
+                if (confirm == null || confirm.ProductCount != before.ProductCount
+                    || !confirm.Sources.Select(item => item.SourceGid)
+                        .OrderBy(value => value, StringComparer.Ordinal)
+                        .SequenceEqual(before.Sources.Select(item => item.SourceGid)
+                            .OrderBy(value => value, StringComparer.Ordinal), StringComparer.Ordinal))
+                    return Conflict(new ErrorResponse("Collection changed during preflight; no changes made."));
+
+                ShopifyShippingManualSelectionMutationResult mutation =
+                    await shopifyAdminService.RemoveManualProductSelectionAsync(
+                        collectionGid, request.SourceGid, request.ProductGid);
+
+                if (mutation.CollectionGid != collectionGid
+                    || before.Sources.Any(item => !mutation.SourceGids.Contains(item.SourceGid)))
+                    throw new ApplicationException(
+                        "Shopify mutation did not preserve original collection source IDs. Inspect before retrying.");
+
+                // Shopify may update membership asynchronously. A short read after
+                // submission is advisory, never proof of full settled membership.
+                ShopifyShippingMembershipAudit? after =
+                    await shopifyAdminService.AuditShippingCollectionMembershipAsync(collectionGid);
+                ShopifyShippingSourceMembershipAudit? afterSource =
+                    after?.Sources.FirstOrDefault(item => item.SourceGid == request.SourceGid);
+
+                return Ok(new ItemResponse<ShopifyShippingManualSelectionRemoveResult>
+                {
+                    Item = new ShopifyShippingManualSelectionRemoveResult
+                    {
+                        PolicyId = id,
+                        CollectionGid = collectionGid,
+                        ProductGid = request.ProductGid,
+                        SourceGid = request.SourceGid,
+                        RemovalSubmitted = true,
+                        JobGid = mutation.JobGid,
+                        JobDone = mutation.JobDone,
+                        SourcePreservedInMutationResponse = true,
+                        SelectionAbsentOnImmediateRead =
+                            afterSource == null || afterSource.MoreManualSelections
+                            ? null
+                            : !afterSource.ManualSelectionProductGids.Contains(request.ProductGid)
+                    }
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Manual selection removal may have changed Shopify for policy {PolicyId}.", id);
+                return StatusCode(502, new ErrorResponse(
+                    "Shopify removal could not be verified. Inspect membership before retrying; do not repeat blindly."));
+            }
+        }
+
         // Read-only preflight for a mapped policy's existing Shopify collection.
         [HttpGet("{id:int}/shopify-collection/tag-source-plan")]
         [Authorize(Policy = "AdminAction")]

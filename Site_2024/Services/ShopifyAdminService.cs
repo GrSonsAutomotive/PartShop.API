@@ -346,6 +346,86 @@ query SiteShippingMembershipAudit($id: ID!) {
             return audit;
         }
 
+
+        // Shopify 2026-07: remove precisely one manually selected PRODUCT
+        // from one collection source. No sources or conditions are deleted.
+        // This must not be called without a guarded membership audit.
+        public async Task<ShopifyShippingManualSelectionMutationResult> RemoveManualProductSelectionAsync(
+            string collectionGid, string sourceGid, string productGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+            const string sourcePrefix = "gid://shopify/CollectionConditionsSource/";
+            const string productPrefix = "gid://shopify/Product/";
+
+            if (!sourceGid.StartsWith(sourcePrefix, StringComparison.Ordinal)
+                || sourceGid.Length <= sourcePrefix.Length
+                || !sourceGid[sourcePrefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Invalid Shopify collection source GID.", nameof(sourceGid));
+            if (!productGid.StartsWith(productPrefix, StringComparison.Ordinal)
+                || productGid.Length <= productPrefix.Length
+                || !productGid[productPrefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Invalid Shopify product GID.", nameof(productGid));
+
+            const string mutation = @"
+mutation SiteRemoveManualShippingProduct($collection: CollectionUpdateInput!) {
+  collectionUpdate(collection: $collection) {
+    collection {
+      id
+      sources { id }
+    }
+    job { id done }
+    userErrors { field message }
+  }
+}";
+            var variables = new
+            {
+                collection = new
+                {
+                    id = collectionGid,
+                    sourcesToUpdate = new[]
+                    {
+                        new
+                        {
+                            condition = new
+                            {
+                                id = sourceGid,
+                                inclusion = new
+                                {
+                                    selectionsToRemove = new[] { new { productId = productGid } }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify manual selection update failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionUpdate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify manual selection update failed");
+
+            JsonElement updated = payload.GetProperty("collection");
+            if (updated.ValueKind != JsonValueKind.Object)
+                throw new ApplicationException("Shopify did not return the updated collection.");
+            ShopifyShippingManualSelectionMutationResult result = new()
+            {
+                CollectionGid = updated.GetProperty("id").GetString() ?? string.Empty,
+                SourceGids = updated.GetProperty("sources").EnumerateArray()
+                    .Select(source => source.GetProperty("id").GetString() ?? string.Empty).ToList()
+            };
+            if (payload.TryGetProperty("job", out JsonElement job)
+                && job.ValueKind == JsonValueKind.Object)
+            {
+                result.JobGid = job.GetProperty("id").GetString();
+                result.JobDone = job.GetProperty("done").GetBoolean();
+            }
+            return result;
+        }
+
         // Append only: no sourcesToUpdate and no sourcesToDelete fields are sent.
         // Caller must preflight original source GIDs and verify them afterward.
         public async Task<ShopifyCollectionSourceCreateResult> AddShippingTagSourceAsync(

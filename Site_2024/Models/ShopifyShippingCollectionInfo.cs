@@ -64,6 +64,37 @@ namespace Site_2024.Web.Api.Models
         public bool MoreManualSelections { get; set; }
     }
 
+    public class ShopifyShippingManualSelectionRemoveRequest
+    {
+        public string ProductGid { get; set; } = string.Empty;
+        public string SourceGid { get; set; } = string.Empty;
+        public string ExpectedTitle { get; set; } = string.Empty;
+        public int ExpectedProductCount { get; set; } = -1;
+        public string Confirmation { get; set; } = string.Empty;
+    }
+
+    public class ShopifyShippingManualSelectionRemoveResult
+    {
+        public int PolicyId { get; set; }
+        public string CollectionGid { get; set; } = string.Empty;
+        public string SourceGid { get; set; } = string.Empty;
+        public string ProductGid { get; set; } = string.Empty;
+        // Accepted by Shopify, but collection membership might still be processing.
+        public bool RemovalSubmitted { get; set; }
+        public bool? JobDone { get; set; }
+        public string? JobGid { get; set; }
+        public bool SourcePreservedInMutationResponse { get; set; }
+        public bool? SelectionAbsentOnImmediateRead { get; set; }
+    }
+
+    public class ShopifyShippingManualSelectionMutationResult
+    {
+        public string CollectionGid { get; set; } = string.Empty;
+        public List<string> SourceGids { get; set; } = new();
+        public string? JobGid { get; set; }
+        public bool? JobDone { get; set; }
+    }
+
     public class ShopifyShippingCollectionAdoptionRequest
     {
         public string CollectionGid { get; set; } = string.Empty;

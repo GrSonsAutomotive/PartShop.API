@@ -13,6 +13,9 @@ namespace Site_2024.Web.Api.Models
         // Independently gated: editing Shopify collection membership sources can
         // affect existing products' checkout rates. Opt in per environment.
         public bool AllowMarketDrivenShippingCollectionSourceWrites { get; set; } = false;
+        // Separate, off-by-default gate for removing individual manual selections.
+        // Does not authorize automatic shipping-policy reassignment.
+        public bool AllowMarketDrivenShippingCollectionMembershipWrites { get; set; } = false;
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";
