@@ -84,7 +84,9 @@ namespace Site_2024.Web.Api.Models
         public bool? JobDone { get; set; }
         public string? JobGid { get; set; }
         public bool SourcePreservedInMutationResponse { get; set; }
+        public bool SourceDeleted { get; set; }
         public bool? SelectionAbsentOnImmediateRead { get; set; }
+        public bool? ProductAbsentFromCollectionOnImmediateRead { get; set; }
     }
 
     public class ShopifyShippingManualSelectionMutationResult

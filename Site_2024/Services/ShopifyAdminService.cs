@@ -347,6 +347,74 @@ query SiteShippingMembershipAudit($id: ID!) {
         }
 
 
+
+        // Shopify does not allow a conditions source with zero selections
+        // and zero conditions. If its last manual product is being reassigned,
+        // unlink that one source from the collection instead. The collection
+        // and its other sources are retained.
+        public async Task<ShopifyShippingManualSelectionMutationResult> DeleteEmptyingManualSourceAsync(
+            string collectionGid, string sourceGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify collection GID.", nameof(collectionGid));
+
+            const string prefix = "gid://shopify/CollectionConditionsSource/";
+            if (!sourceGid.StartsWith(prefix, StringComparison.Ordinal)
+                || sourceGid.Length <= prefix.Length
+                || !sourceGid[prefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Invalid Shopify collection source GID.", nameof(sourceGid));
+
+            const string mutation = @"
+mutation SiteDeleteExhaustedShippingSource($collection: CollectionUpdateInput!) {
+  collectionUpdate(collection: $collection) {
+    collection {
+      id
+      sources { id }
+    }
+    job { id done }
+    userErrors { field message }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                mutation,
+                new
+                {
+                    collection = new
+                    {
+                        id = collectionGid,
+                        sourcesToDelete = new[] { sourceGid }
+                    }
+                },
+                "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping source unlink failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionUpdate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify shipping source unlink failed");
+
+            JsonElement updated = payload.GetProperty("collection");
+            if (updated.ValueKind != JsonValueKind.Object)
+                throw new ApplicationException("Shopify did not return the collection after removing its source.");
+
+            ShopifyShippingManualSelectionMutationResult result = new()
+            {
+                CollectionGid = updated.GetProperty("id").GetString() ?? "",
+                SourceGids = updated.GetProperty("sources").EnumerateArray()
+                    .Select(item => item.GetProperty("id").GetString() ?? "").ToList()
+            };
+
+            if (payload.TryGetProperty("job", out JsonElement job)
+                && job.ValueKind == JsonValueKind.Object)
+            {
+                result.JobGid = job.GetProperty("id").GetString();
+                result.JobDone = job.GetProperty("done").GetBoolean();
+            }
+
+            return result;
+        }
+
         // Shopify 2026-07: remove precisely one manually selected PRODUCT
         // from one collection source. No sources or conditions are deleted.
         // This must not be called without a guarded membership audit.

@@ -369,6 +369,35 @@ namespace Site_2024.Web.Api.Controllers
                     return Conflict(new ErrorResponse(
                         "Product is not explicitly selected in this source. No changes made."));
 
+                bool sourceWouldBecomeEmpty =
+                    memberSource.ManualSelectionProductGids.Count == 1;
+
+                // Never delete the only remaining source, and never delete a
+                // manual source unless a separate unrestricted automatic source
+                // for this same policy remains. This prevents removing unrelated
+                // inventory or leaving the collection without shipping members.
+                if (sourceWouldBecomeEmpty)
+                {
+                    string expectedShippingTag = $"ShippingClass_{id}";
+                    bool replacementTagSource = before.Sources.Any(other =>
+                        other.SourceGid != request.SourceGid
+                        && other.SourceType == "CollectionConditionsSource"
+                        && other.TargetType == "PRODUCTS"
+                        && other.InclusionConditionCount == 1
+                        && !other.HasExclusions
+                        && !other.HasExplicitSelections
+                        && other.TagConditions.Count == 1
+                        && other.TagConditions[0].Relation == "TAGGED_WITH"
+                        && other.TagConditions[0].MatchType == "ANY"
+                        && other.TagConditions[0].Values.Count == 1
+                        && string.Equals(other.TagConditions[0].Values[0],
+                            expectedShippingTag, StringComparison.OrdinalIgnoreCase));
+
+                    if (!replacementTagSource)
+                        return Conflict(new ErrorResponse(
+                            "Cannot remove last manual selection without a verified, unrestricted shipping-tag source."));
+                }
+
                 // Re-read just before mutation to catch source-condition changes.
                 ShopifyShippingCollectionInfo? confirm =
                     await shopifyAdminService.GetShippingCollectionAsync(collectionGid);
@@ -380,15 +409,28 @@ namespace Site_2024.Web.Api.Controllers
                     return Conflict(new ErrorResponse("Collection changed during preflight; no changes made."));
 
                 failureStage = "shopify_mutation";
+                // Shopify forbids empty condition-based sources. Remove the
+                // exhausted manual source only if this is its sole product;
+                // otherwise remove just the requested product selection.
                 ShopifyShippingManualSelectionMutationResult mutation =
-                    await shopifyAdminService.RemoveManualProductSelectionAsync(
+                    sourceWouldBecomeEmpty
+                    ? await shopifyAdminService.DeleteEmptyingManualSourceAsync(
+                        collectionGid, request.SourceGid)
+                    : await shopifyAdminService.RemoveManualProductSelectionAsync(
                         collectionGid, request.SourceGid, request.ProductGid);
 
                 failureStage = "post_mutation_verification";
+                bool targetedSourcePresent = mutation.SourceGids.Contains(request.SourceGid);
+                bool unrelatedSourcesPreserved = before.Sources
+                    .Where(item => item.SourceGid != request.SourceGid)
+                    .All(item => mutation.SourceGids.Contains(item.SourceGid));
+
                 if (mutation.CollectionGid != collectionGid
-                    || before.Sources.Any(item => !mutation.SourceGids.Contains(item.SourceGid)))
+                    || !unrelatedSourcesPreserved
+                    || (sourceWouldBecomeEmpty && targetedSourcePresent)
+                    || (!sourceWouldBecomeEmpty && !targetedSourcePresent))
                     throw new ApplicationException(
-                        "Shopify mutation did not preserve original collection source IDs. Inspect before retrying.");
+                        "Shopify source update returned an unexpected source set. Inspect before retrying.");
 
                 // Shopify may update membership asynchronously. A short read after
                 // submission is advisory, never proof of full settled membership.
@@ -408,11 +450,18 @@ namespace Site_2024.Web.Api.Controllers
                         RemovalSubmitted = true,
                         JobGid = mutation.JobGid,
                         JobDone = mutation.JobDone,
-                        SourcePreservedInMutationResponse = true,
+                        SourcePreservedInMutationResponse = !sourceWouldBecomeEmpty,
+                        SourceDeleted = sourceWouldBecomeEmpty,
                         SelectionAbsentOnImmediateRead =
-                            afterSource == null || afterSource.MoreManualSelections
-                            ? null
-                            : !afterSource.ManualSelectionProductGids.Contains(request.ProductGid)
+                            after == null ? null
+                            : sourceWouldBecomeEmpty
+                                ? afterSource == null
+                                : afterSource == null || afterSource.MoreManualSelections
+                                    ? null
+                                    : !afterSource.ManualSelectionProductGids.Contains(request.ProductGid),
+                        ProductAbsentFromCollectionOnImmediateRead =
+                            after == null || after.MoreCollectionProducts ? null
+                            : !after.CollectionProductGids.Contains(request.ProductGid)
                     }
                 });
             }
