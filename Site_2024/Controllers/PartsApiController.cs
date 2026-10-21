@@ -666,7 +666,7 @@ namespace Site_2024.Web.Api.Controllers
                                             plan.Notes.Add("The part has a complex manually selected source requiring separate review.");
                                     }
                                 }
-                                if (!plan.OldManualSelectionScanComplete)
+                                if (plan.OldManualSelectionScanComplete != true)
                                     plan.Notes.Add("Some manual source selections exceed the first audit page; full pagination is required.");
                             }
                         }
