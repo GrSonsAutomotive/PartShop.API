@@ -41,6 +41,27 @@ namespace Site_2024.Web.Api.Models
         public string SourceGid { get; set; } = string.Empty;
     }
 
+
+    public class ShopifyShippingReassignmentRequest
+    {
+        public int ExpectedCurrentShippingPolicyId { get; set; }
+        public int TargetShippingPolicyId { get; set; }
+        public string ExpectedShopifyProductGid { get; set; } = string.Empty;
+        public string Confirmation { get; set; } = string.Empty;
+    }
+
+    public class ShopifyShippingReassignmentResult
+    {
+        public int PartId { get; set; }
+        public int PreviousPolicyId { get; set; }
+        public int CurrentPolicyId { get; set; }
+        public string ShopifyProductGid { get; set; } = string.Empty;
+        public bool ShopifyMembershipVerified { get; set; }
+        public bool LocalPolicyUpdated { get; set; }
+        public bool PublicationRestored { get; set; }
+        public bool OriginalPublishedOnOnlineStore { get; set; }
+    }
+
     public class ShopifyProductShippingSnapshot
     {
         public string ProductGid { get; set; } = string.Empty;

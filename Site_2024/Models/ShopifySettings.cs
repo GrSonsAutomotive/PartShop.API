@@ -16,6 +16,10 @@ namespace Site_2024.Web.Api.Models
         // Separate, off-by-default gate for removing individual manual selections.
         // Does not authorize automatic shipping-policy reassignment.
         public bool AllowMarketDrivenShippingCollectionMembershipWrites { get; set; } = false;
+        // Entirely separate and off by default. Authorizes a controlled
+        // unpublish -> tag sync -> collection verify -> SQL patch -> republish.
+        // Never enable for production before recovery/volume testing.
+        public bool AllowMarketDrivenShippingReassignmentWrites { get; set; } = false;
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";

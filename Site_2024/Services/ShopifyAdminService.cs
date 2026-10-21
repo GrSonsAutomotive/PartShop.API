@@ -1027,6 +1027,60 @@ query SiteShippingProductSnapshot($id: ID!, $publicationId: ID!) {
             };
         }
 
+
+        // Exhaustive and bounded: never conclude "not present" from the first
+        // page of a Shopify collection (production may contain many products).
+        // Throw on an incomplete scan rather than permitting checkout.
+        public async Task<bool> CollectionContainsProductAsync(string collectionGid, string productGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Valid Shopify collection GID required.", nameof(collectionGid));
+            const string productPrefix = "gid://shopify/Product/";
+            if (string.IsNullOrWhiteSpace(productGid)
+                || !productGid.StartsWith(productPrefix, StringComparison.Ordinal)
+                || !productGid[productPrefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Valid Shopify product GID required.", nameof(productGid));
+
+            const string query = @"
+query SiteShippingCollectionProductMembership($id: ID!, $after: String) {
+  collection(id: $id) {
+    id
+    products(first: 100, after: $after) {
+      nodes { id }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}";
+            string? after = null;
+            // At most 100,000 products per collection; abort closed above that.
+            for (int pageNumber = 0; pageNumber < 1000; pageNumber++)
+            {
+                using JsonDocument doc = await SendGraphQlAsync(query,
+                    new { id = collectionGid, after }, "2026-07");
+                JsonElement root = doc.RootElement;
+                if (root.TryGetProperty("errors", out JsonElement errors))
+                    throw new ApplicationException($"Shopify collection membership scan failed: {errors}");
+                JsonElement collection = root.GetProperty("data").GetProperty("collection");
+                if (collection.ValueKind != JsonValueKind.Object)
+                    throw new ApplicationException("Shipping collection was not found.");
+
+                JsonElement members = collection.GetProperty("products");
+                if (members.GetProperty("nodes").EnumerateArray().Any(
+                    p => p.GetProperty("id").GetString() == productGid))
+                    return true;
+
+                JsonElement info = members.GetProperty("pageInfo");
+                if (!info.GetProperty("hasNextPage").GetBoolean())
+                    return false;
+
+                string? next = info.GetProperty("endCursor").GetString();
+                if (string.IsNullOrWhiteSpace(next) || next == after)
+                    throw new ApplicationException("Shopify collection pagination stalled.");
+                after = next;
+            }
+            throw new ApplicationException("Shopify collection too large to certify membership safely.");
+        }
+
         public async Task SyncProductTagsForPartAsync(Part part)
         {
             if (!part.ShopifyProductId.HasValue)

@@ -23,6 +23,7 @@ namespace Site_2024.Web.Api.Services
         Task<ShopifyProductInventorySyncResult> SyncProductDetailsForPartAsync(Part part);
         Task SyncProductTagsForPartAsync(Part part);
         Task<ShopifyProductShippingSnapshot> GetProductShippingSnapshotAsync(long productId);
+        Task<bool> CollectionContainsProductAsync(string collectionGid, string productGid);
         Task<ShopifyProductMediaSyncResult> SyncProductImagesAsync(Part part, IReadOnlyCollection<PartImage> images);
         Task<ShopifyCollectionCreateResult> CreateAutomatedCollectionForDiscountAsync(AdminDiscountCode discount);
         Task<ShopifyDiscountCreateResult> CreateBasicDiscountCodeAsync(AdminDiscountCode discount);
