@@ -18,6 +18,12 @@ namespace Site_2024.Web.Api.Models
         public string? TargetCollectionGid { get; set; }
         public string? ExpectedTargetTag { get; set; }
         public bool TargetHasMatchingTagSource { get; set; }
+
+        public string? ShopifyProductStatus { get; set; }
+        public bool? ShopifyPublishedOnOnlineStore { get; set; }
+        public string? ShopifyOnlineStorePublicationGid { get; set; }
+        public List<string> ShopifyShippingClassTags { get; set; } = new();
+        public bool? CurrentShopifyTagMatchesSql { get; set; }
         public bool? OldManualSelectionScanComplete { get; set; }
         public List<string> OldManualSourceGidsContainingProduct { get; set; } = new();
         public bool? AllMappedManualSelectionScansComplete { get; set; }
@@ -33,6 +39,15 @@ namespace Site_2024.Web.Api.Models
         public int PolicyId { get; set; }
         public string CollectionGid { get; set; } = string.Empty;
         public string SourceGid { get; set; } = string.Empty;
+    }
+
+    public class ShopifyProductShippingSnapshot
+    {
+        public string ProductGid { get; set; } = string.Empty;
+        public string Status { get; set; } = string.Empty;
+        public string OnlineStorePublicationGid { get; set; } = string.Empty;
+        public bool PublishedOnOnlineStore { get; set; }
+        public List<string> ShippingClassTags { get; set; } = new();
     }
 
     public class ShopifyShippingCollectionInfo

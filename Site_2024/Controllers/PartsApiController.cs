@@ -785,6 +785,25 @@ namespace Site_2024.Web.Api.Controllers
                         plan.Notes.Add("Manual memberships exist in mapped collections; automatic tag-only reassignment is not sufficient.");
                 }
 
+
+                if (marketDriven && part.ShopifyProductId.HasValue)
+                {
+                    ShopifyProductShippingSnapshot snapshot =
+                        await _shopifyAdminService.GetProductShippingSnapshotAsync(
+                            part.ShopifyProductId.Value);
+                    plan.ShopifyProductStatus = snapshot.Status;
+                    plan.ShopifyPublishedOnOnlineStore = snapshot.PublishedOnOnlineStore;
+                    plan.ShopifyOnlineStorePublicationGid = snapshot.OnlineStorePublicationGid;
+                    plan.ShopifyShippingClassTags = snapshot.ShippingClassTags;
+                    string currentShippingTag = $"ShippingClass_{part.ShippingPolicy?.Id}";
+                    plan.CurrentShopifyTagMatchesSql =
+                        snapshot.ShippingClassTags.Count == 1
+                        && string.Equals(snapshot.ShippingClassTags[0], currentShippingTag,
+                            StringComparison.OrdinalIgnoreCase);
+                    if (!plan.CurrentShopifyTagMatchesSql)
+                        plan.Notes.Add("Shopify shipping-class tags do not uniquely match the part's current SQL policy; investigate before reassignment.");
+                }
+
                 plan.Notes.Add("Read-only preview only. Automatic Market-driven Shipping reassignment remains blocked.");
                 return Ok(new ItemResponse<ShopifyShippingReassignmentPlan> { Item = plan });
             }

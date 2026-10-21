@@ -985,6 +985,48 @@ query GetLocations {
         }
 
 
+
+        // Read-only shipping preflight. Publication state must be preserved by
+        // any future guarded reassignment; draft products must not go live.
+        public async Task<ShopifyProductShippingSnapshot> GetProductShippingSnapshotAsync(long productId)
+        {
+            if (productId <= 0)
+                throw new ArgumentException("A valid Shopify product ID is required.", nameof(productId));
+
+            string publicationGid = await GetOnlineStorePublicationGidAsync();
+            string productGid = $"gid://shopify/Product/{productId}";
+            const string query = @"
+query SiteShippingProductSnapshot($id: ID!, $publicationId: ID!) {
+  product(id: $id) {
+    id
+    status
+    tags
+    publishedOnPublication(publicationId: $publicationId)
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query, new { id = productGid, publicationId = publicationGid });
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify product shipping snapshot failed: {errors}");
+
+            JsonElement product = root.GetProperty("data").GetProperty("product");
+            if (product.ValueKind != JsonValueKind.Object)
+                throw new ApplicationException("Shopify product was not found for shipping preflight.");
+
+            return new ShopifyProductShippingSnapshot
+            {
+                ProductGid = product.GetProperty("id").GetString() ?? "",
+                Status = product.GetProperty("status").GetString() ?? "",
+                OnlineStorePublicationGid = publicationGid,
+                PublishedOnOnlineStore = product.GetProperty("publishedOnPublication").GetBoolean(),
+                ShippingClassTags = product.GetProperty("tags").EnumerateArray()
+                    .Select(tag => tag.GetString() ?? "")
+                    .Where(tag => tag.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                    .ToList()
+            };
+        }
+
         public async Task SyncProductTagsForPartAsync(Part part)
         {
             if (!part.ShopifyProductId.HasValue)
