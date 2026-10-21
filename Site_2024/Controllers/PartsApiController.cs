@@ -800,7 +800,7 @@ namespace Site_2024.Web.Api.Controllers
                         snapshot.ShippingClassTags.Count == 1
                         && string.Equals(snapshot.ShippingClassTags[0], currentShippingTag,
                             StringComparison.OrdinalIgnoreCase);
-                    if (!plan.CurrentShopifyTagMatchesSql)
+                    if (plan.CurrentShopifyTagMatchesSql != true)
                         plan.Notes.Add("Shopify shipping-class tags do not uniquely match the part's current SQL policy; investigate before reassignment.");
                 }
 
