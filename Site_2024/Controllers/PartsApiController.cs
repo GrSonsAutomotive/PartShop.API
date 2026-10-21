@@ -703,6 +703,88 @@ namespace Site_2024.Web.Api.Controllers
                     }
                 }
 
+                // Cross-policy audit: migration may leave historical manual memberships
+                // outside the current SQL policy collection. Sampled source selections
+                // are never treated as complete when Shopify reports another page.
+                if (marketDriven && plan.ShippingPolicyChanges && part.ShopifyProductId.HasValue)
+                {
+                    var checkoutPolicies = policies
+                        .Where(p => p.IsActive && p.AllowsOnlineCheckout)
+                        .ToList();
+
+                    plan.UnmappedActiveCheckoutPolicyIds = checkoutPolicies
+                        .Where(p => string.IsNullOrWhiteSpace(p.ShopifyShippingCollectionGid))
+                        .Select(p => p.Id).OrderBy(v => v).ToList();
+
+                    plan.AllMappedManualSelectionScansComplete =
+                        plan.UnmappedActiveCheckoutPolicyIds.Count == 0;
+
+                    foreach (var group in checkoutPolicies
+                        .Where(p => !string.IsNullOrWhiteSpace(p.ShopifyShippingCollectionGid))
+                        .GroupBy(p => p.ShopifyShippingCollectionGid!, StringComparer.Ordinal))
+                    {
+                        plan.MappedCollectionsInspected++;
+                        try
+                        {
+                            ShopifyShippingMembershipAudit? audit =
+                                await _shopifyAdminService.AuditShippingCollectionMembershipAsync(group.Key);
+                            if (audit == null || audit.CollectionGid != group.Key)
+                            {
+                                plan.AllMappedManualSelectionScansComplete = false;
+                                plan.CollectionsWithIncompleteScans.Add(group.Key);
+                                continue;
+                            }
+
+                            bool scanComplete = true;
+                            foreach (ShopifyShippingSourceMembershipAudit source in audit.Sources)
+                            {
+                                // Unknown source types cannot be certified by the
+                                // manual-selection query; never assume they're empty.
+                                if (source.SourceType != "CollectionConditionsSource"
+                                    || source.MoreManualSelections)
+                                {
+                                    scanComplete = false;
+                                }
+
+                                if (source.ManualSelectionProductGids.Contains(plan.ShopifyProductGid!))
+                                {
+                                    foreach (ShippingPolicy mappedPolicy in group)
+                                    {
+                                        plan.ManualMembershipsAcrossMappedCollections.Add(
+                                            new ShopifyShippingManualMembershipHit
+                                            {
+                                                PolicyId = mappedPolicy.Id,
+                                                CollectionGid = group.Key,
+                                                SourceGid = source.SourceGid
+                                            });
+                                    }
+                                }
+                            }
+
+                            if (!scanComplete)
+                            {
+                                plan.AllMappedManualSelectionScansComplete = false;
+                                plan.CollectionsWithIncompleteScans.Add(group.Key);
+                            }
+                        }
+                        catch (Exception scanEx)
+                        {
+                            Logger.LogWarning(scanEx,
+                                "Cross-policy shipping membership read failed for PartId {PartId}, Collection {CollectionGid}.",
+                                id, group.Key);
+                            plan.AllMappedManualSelectionScansComplete = false;
+                            plan.CollectionsWithIncompleteScans.Add(group.Key);
+                        }
+                    }
+
+                    if (plan.UnmappedActiveCheckoutPolicyIds.Count > 0)
+                        plan.Notes.Add("Some active checkout policies are unmapped; migration readiness cannot be established.");
+                    if (!plan.AllMappedManualSelectionScansComplete)
+                        plan.Notes.Add("Cross-policy manual membership scan is incomplete. Do not proceed with reassignment.");
+                    if (plan.ManualMembershipsAcrossMappedCollections.Count > 0)
+                        plan.Notes.Add("Manual memberships exist in mapped collections; automatic tag-only reassignment is not sufficient.");
+                }
+
                 plan.Notes.Add("Read-only preview only. Automatic Market-driven Shipping reassignment remains blocked.");
                 return Ok(new ItemResponse<ShopifyShippingReassignmentPlan> { Item = plan });
             }

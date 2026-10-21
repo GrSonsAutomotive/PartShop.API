@@ -20,7 +20,19 @@ namespace Site_2024.Web.Api.Models
         public bool TargetHasMatchingTagSource { get; set; }
         public bool? OldManualSelectionScanComplete { get; set; }
         public List<string> OldManualSourceGidsContainingProduct { get; set; } = new();
+        public bool? AllMappedManualSelectionScansComplete { get; set; }
+        public int MappedCollectionsInspected { get; set; }
+        public List<int> UnmappedActiveCheckoutPolicyIds { get; set; } = new();
+        public List<string> CollectionsWithIncompleteScans { get; set; } = new();
+        public List<ShopifyShippingManualMembershipHit> ManualMembershipsAcrossMappedCollections { get; set; } = new();
         public List<string> Notes { get; set; } = new();
+    }
+
+    public class ShopifyShippingManualMembershipHit
+    {
+        public int PolicyId { get; set; }
+        public string CollectionGid { get; set; } = string.Empty;
+        public string SourceGid { get; set; } = string.Empty;
     }
 
     public class ShopifyShippingCollectionInfo
