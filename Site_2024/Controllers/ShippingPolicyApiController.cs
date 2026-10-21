@@ -325,6 +325,9 @@ namespace Site_2024.Web.Api.Controllers
             if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
                 return Conflict(new ErrorResponse("Policy does not have a Shopify collection mapping."));
 
+            // Stage markers make failed attempts diagnosable without revealing
+            // OAuth tokens, request payloads, or Shopify raw response bodies.
+            string failureStage = "preflight";
             try
             {
                 if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
@@ -376,10 +379,12 @@ namespace Site_2024.Web.Api.Controllers
                             .OrderBy(value => value, StringComparer.Ordinal), StringComparer.Ordinal))
                     return Conflict(new ErrorResponse("Collection changed during preflight; no changes made."));
 
+                failureStage = "shopify_mutation";
                 ShopifyShippingManualSelectionMutationResult mutation =
                     await shopifyAdminService.RemoveManualProductSelectionAsync(
                         collectionGid, request.SourceGid, request.ProductGid);
 
+                failureStage = "post_mutation_verification";
                 if (mutation.CollectionGid != collectionGid
                     || before.Sources.Any(item => !mutation.SourceGids.Contains(item.SourceGid)))
                     throw new ApplicationException(
@@ -417,9 +422,13 @@ namespace Site_2024.Web.Api.Controllers
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "Manual selection removal may have changed Shopify for policy {PolicyId}.", id);
+                Logger.LogError(ex,
+                    "Manual shipping selection removal failed. Stage: {FailureStage}; PolicyId: {PolicyId}; Collection: {CollectionGid}; Source: {SourceGid}; Product: {ProductGid}.",
+                    failureStage, id, policy.ShopifyShippingCollectionGid,
+                    request.SourceGid, request.ProductGid);
                 return StatusCode(502, new ErrorResponse(
-                    "Shopify removal could not be verified. Inspect membership before retrying; do not repeat blindly."));
+                    $"Manual selection removal failed at stage '{failureStage}'. " +
+                    "Inspect Shopify membership and DEV application logs before retrying."));
             }
         }
 
