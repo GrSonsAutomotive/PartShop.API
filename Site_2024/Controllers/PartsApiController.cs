@@ -779,7 +779,7 @@ namespace Site_2024.Web.Api.Controllers
 
                     if (plan.UnmappedActiveCheckoutPolicyIds.Count > 0)
                         plan.Notes.Add("Some active checkout policies are unmapped; migration readiness cannot be established.");
-                    if (!plan.AllMappedManualSelectionScansComplete)
+                    if (plan.AllMappedManualSelectionScansComplete != true)
                         plan.Notes.Add("Cross-policy manual membership scan is incomplete. Do not proceed with reassignment.");
                     if (plan.ManualMembershipsAcrossMappedCollections.Count > 0)
                         plan.Notes.Add("Manual memberships exist in mapped collections; automatic tag-only reassignment is not sufficient.");
