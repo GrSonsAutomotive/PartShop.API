@@ -562,6 +562,159 @@ namespace Site_2024.Web.Api.Controllers
             return StatusCode(code, response);
         }
 
+        // Read-only preview. Intentionally does not authorize a shipping-policy
+        // reassignment. Migrated collections can have manual memberships that
+        // survive product tag changes, and audits currently show only 10 selections
+        // per source. Ambiguous/partial membership scans are explicitly flagged.
+        [HttpGet("{id:int}/shopify/shipping-reassignment-plan")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingReassignmentPlan>>> GetShippingReassignmentPlan(
+            int id,
+            [FromQuery] int targetShippingPolicyId,
+            [FromServices] IShippingPoliciesService policiesService)
+        {
+            if (targetShippingPolicyId <= 0)
+                return BadRequest(new ErrorResponse("A valid targetShippingPolicyId is required."));
+
+            try
+            {
+                Part part = _service.GetPartById(id);
+                if (part == null)
+                    return NotFound(new ErrorResponse("Part not found."));
+
+                List<ShippingPolicy> policies = policiesService.GetAll() ?? new();
+                ShippingPolicy? target = policies.FirstOrDefault(p => p.Id == targetShippingPolicyId && p.IsActive);
+                if (target == null)
+                    return BadRequest(new ErrorResponse("Target shipping policy is not active or does not exist."));
+
+                ShippingPolicy? current = policies.FirstOrDefault(p => p.Id == part.ShippingPolicy?.Id);
+                bool marketDriven = await _shopifyAdminService.UsesMarketDrivenShippingAsync();
+
+                ShopifyShippingReassignmentPlan plan = new()
+                {
+                    PartId = id,
+                    CurrentShippingPolicyId = part.ShippingPolicy?.Id,
+                    TargetShippingPolicyId = target.Id,
+                    ShopifyProductGid = part.ShopifyProductId.HasValue
+                        ? $"gid://shopify/Product/{part.ShopifyProductId.Value}" : null,
+                    MarketDrivenShipping = marketDriven,
+                    ShippingPolicyChanges = targetShippingPolicyId != part.ShippingPolicy?.Id,
+                    CurrentCollectionGid = current?.ShopifyShippingCollectionGid,
+                    TargetCollectionGid = target.ShopifyShippingCollectionGid,
+                    ExpectedTargetTag = target.AllowsOnlineCheckout
+                        ? $"ShippingClass_{target.Id}" : null,
+                    TargetIsContactOnly = !target.AllowsOnlineCheckout
+                };
+
+                if (!plan.ShippingPolicyChanges)
+                {
+                    plan.Notes.Add("The part already uses this shipping policy; no reassignment is needed.");
+                }
+                else if (!marketDriven)
+                {
+                    plan.Notes.Add("The store uses legacy delivery profiles; this preview only audits Market-driven Shipping.");
+                }
+                else if (!part.ShopifyProductId.HasValue)
+                {
+                    plan.Notes.Add("The part has no Shopify product; there is no Shopify membership to remove.");
+                }
+                else
+                {
+                    // This is a preview, not a verified plan for executing writes.
+                    // A production-grade reassignment must check every mapped
+                    // collection and paginate every manual source.
+                    if (current?.AllowsOnlineCheckout == true)
+                    {
+                        if (string.IsNullOrWhiteSpace(current.ShopifyShippingCollectionGid))
+                        {
+                            plan.Notes.Add("Current policy has no mapped collection; membership cannot be inspected.");
+                            plan.OldManualSelectionScanComplete = false;
+                        }
+                        else
+                        {
+                            ShopifyShippingCollectionInfo? sourceCollection =
+                                await _shopifyAdminService.GetShippingCollectionAsync(
+                                    current.ShopifyShippingCollectionGid);
+                            ShopifyShippingMembershipAudit? audit =
+                                await _shopifyAdminService.AuditShippingCollectionMembershipAsync(
+                                    current.ShopifyShippingCollectionGid);
+
+                            if (sourceCollection == null || audit == null)
+                            {
+                                plan.OldManualSelectionScanComplete = false;
+                                plan.Notes.Add("Current shipping collection could not be audited.");
+                            }
+                            else
+                            {
+                                plan.OldManualSelectionScanComplete = true;
+                                foreach (ShopifyShippingSourceMembershipAudit member in audit.Sources)
+                                {
+                                    ShopifyShippingCollectionSourceInfo? source =
+                                        sourceCollection.Sources.FirstOrDefault(s => s.SourceGid == member.SourceGid);
+                                    if (member.MoreManualSelections || source == null)
+                                    {
+                                        plan.OldManualSelectionScanComplete = false;
+                                        continue;
+                                    }
+                                    if (member.ManualSelectionProductGids.Contains(plan.ShopifyProductGid!))
+                                    {
+                                        plan.OldManualSourceGidsContainingProduct.Add(member.SourceGid);
+                                        if (source.SourceType != "CollectionConditionsSource"
+                                            || source.TargetType != "PRODUCTS"
+                                            || source.InclusionConditionCount != 0
+                                            || source.HasExclusions)
+                                            plan.Notes.Add("The part has a complex manually selected source requiring separate review.");
+                                    }
+                                }
+                                if (!plan.OldManualSelectionScanComplete)
+                                    plan.Notes.Add("Some manual source selections exceed the first audit page; full pagination is required.");
+                            }
+                        }
+                    }
+
+                    if (target.AllowsOnlineCheckout)
+                    {
+                        if (string.IsNullOrWhiteSpace(target.ShopifyShippingCollectionGid))
+                            plan.Notes.Add("Target policy has no mapped Shopify collection.");
+                        else
+                        {
+                            ShopifyShippingCollectionInfo? destination =
+                                await _shopifyAdminService.GetShippingCollectionAsync(
+                                    target.ShopifyShippingCollectionGid);
+                            plan.TargetHasMatchingTagSource = destination?.Sources.Any(source =>
+                                source.SourceType == "CollectionConditionsSource"
+                                && source.TargetType == "PRODUCTS"
+                                && !source.HasExclusions
+                                && !source.HasExplicitSelections
+                                && source.InclusionConditionCount == 1
+                                && source.TagConditions.Count == 1
+                                && source.TagConditions[0].Relation == "TAGGED_WITH"
+                                && source.TagConditions[0].MatchType == "ANY"
+                                && source.TagConditions[0].Values.Count == 1
+                                && string.Equals(source.TagConditions[0].Values[0],
+                                    plan.ExpectedTargetTag, StringComparison.OrdinalIgnoreCase)) == true;
+                            if (!plan.TargetHasMatchingTagSource)
+                                plan.Notes.Add("Target collection lacks a verified, unrestricted shipping-tag source.");
+                        }
+                    }
+                    else
+                    {
+                        plan.Notes.Add("Contact-only target must be unpublished before any membership change.");
+                    }
+                }
+
+                plan.Notes.Add("Read-only preview only. Automatic Market-driven Shipping reassignment remains blocked.");
+                return Ok(new ItemResponse<ShopifyShippingReassignmentPlan> { Item = plan });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex,
+                    "Failed read-only shipping reassignment preview for PartId {PartId}.", id);
+                return StatusCode(502, new ErrorResponse(
+                    "Could not inspect Shopify shipping memberships. No changes were made."));
+            }
+        }
+
         [HttpPatch("{id:int}")]
         [Authorize(Policy = "AdminAction")]
         public async Task<ActionResult<BaseResponse>> UpdatePart(int id, [FromBody] PartPatchRequest model)
@@ -756,6 +909,36 @@ namespace Site_2024.Web.Api.Controllers
                 {
                     code = 404;
                     return StatusCode(code, new ErrorResponse("Part not found."));
+                }
+
+                // Market-driven shipping still has migrated manual collection
+                // membership. A tag update alone does NOT safely reassign it.
+                // Block a policy change before SQL is saved, until the complete
+                // unpublish/membership/verification workflow has been built.
+                if (model.ShippingPolicyId.HasValue
+                    && existingPart.ShopifyProductId.HasValue
+                    && model.ShippingPolicyId.Value != existingPart.ShippingPolicy?.Id)
+                {
+                    bool marketDriven;
+                    try
+                    {
+                        marketDriven = await _shopifyAdminService.UsesMarketDrivenShippingAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError(ex,
+                            "Unable to verify Shopify shipping mode before changing policy for PartId {PartId}.",
+                            id);
+                        return StatusCode(503, new ErrorResponse(
+                            "Could not verify Shopify shipping mode. No part changes were saved."));
+                    }
+
+                    if (marketDriven)
+                    {
+                        return StatusCode(409, new ErrorResponse(
+                            "Shipping-policy reassignment is not yet enabled for Market-driven Shipping. " +
+                            "No part changes were saved. Use the read-only shipping-reassignment-plan endpoint first."));
+                    }
                 }
 
                 _service.PatchPart(id, model, user.Id);

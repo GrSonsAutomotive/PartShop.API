@@ -4,6 +4,25 @@ namespace Site_2024.Web.Api.Models
 {
     // Read-only snapshots of Shopify's 2026-07 composable collection model.
     // We never infer collection ownership or shipping eligibility from names alone.
+    // Diagnostic only: intentionally excludes any executable reassignment token.
+    public class ShopifyShippingReassignmentPlan
+    {
+        public int PartId { get; set; }
+        public int? CurrentShippingPolicyId { get; set; }
+        public int TargetShippingPolicyId { get; set; }
+        public string? ShopifyProductGid { get; set; }
+        public bool MarketDrivenShipping { get; set; }
+        public bool ShippingPolicyChanges { get; set; }
+        public bool TargetIsContactOnly { get; set; }
+        public string? CurrentCollectionGid { get; set; }
+        public string? TargetCollectionGid { get; set; }
+        public string? ExpectedTargetTag { get; set; }
+        public bool TargetHasMatchingTagSource { get; set; }
+        public bool? OldManualSelectionScanComplete { get; set; }
+        public List<string> OldManualSourceGidsContainingProduct { get; set; } = new();
+        public List<string> Notes { get; set; } = new();
+    }
+
     public class ShopifyShippingCollectionInfo
     {
         public string CollectionGid { get; set; } = string.Empty;
