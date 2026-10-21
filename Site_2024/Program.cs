@@ -74,6 +74,12 @@ builder.Services.AddSwaggerGen();
 // Add logging
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();
+// Azure App Service filesystem and Log Stream capture requires its dedicated
+// diagnostics provider. Keep console/debug for local development.
+if (isAzureAppService)
+{
+    builder.Logging.AddAzureWebAppDiagnostics();
+}
 
 // Configure CORS
 builder.Services.AddCors(options =>
