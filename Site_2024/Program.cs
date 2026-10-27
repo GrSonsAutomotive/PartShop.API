@@ -162,6 +162,10 @@ builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IConditionService, ConditionService>();
 builder.Services.AddScoped<IShippingPoliciesService, ShippingPoliciesService>();
+// SQL-backed, independently gated background shipping pilot.
+builder.Services.AddScoped<ShopifyShippingJobStore>();
+builder.Services.AddScoped<ShopifyShippingAsyncProcessor>();
+builder.Services.AddHostedService<ShopifyShippingJobWorker>();
 builder.Services.AddScoped<IRefundRequestService, RefundRequestService>();
 builder.Services.AddScoped<IRefundFinalizationService, RefundFinalizationService>();
 builder.Services.AddScoped<IRefundInventoryDispositionService, RefundInventoryDispositionService>();

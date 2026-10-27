@@ -24,6 +24,8 @@ namespace Site_2024.Web.Api.Controllers
         private readonly IAuthenticationService<IUserAuthData> _authService;
         private readonly IWebHostEnvironment _webHostEnvironment;
         private readonly IConfiguration _configuration;
+        private readonly ShopifyShippingJobStore _shippingJobStore;
+        private readonly Microsoft.Extensions.Options.IOptions<ShopifySettings> _shippingSettings;
 
         public PartsApiController(
             IPartService service,
@@ -34,7 +36,9 @@ namespace Site_2024.Web.Api.Controllers
             ILogger<PartsApiController> logger,
             IAuthenticationService<IUserAuthData> authService,
             IWebHostEnvironment webHostEnvironment,
-            IConfiguration configuration
+            IConfiguration configuration,
+            ShopifyShippingJobStore shippingJobStore,
+            Microsoft.Extensions.Options.IOptions<ShopifySettings> shippingSettings
         ) : base(logger)
         {
             _service = service;
@@ -45,6 +49,8 @@ namespace Site_2024.Web.Api.Controllers
             _authService = authService;
             _webHostEnvironment = webHostEnvironment;
             _configuration = configuration;
+            _shippingJobStore = shippingJobStore;
+            _shippingSettings = shippingSettings;
         }
 
         [HttpPost("add-new")]
@@ -185,6 +191,13 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(code, response);
                 }
 
+                if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                    await _shippingJobStore.HasOpenAsync(id))
+                {
+                    return Conflict(new ErrorResponse(
+                        "A shipping policy update is pending or needs attention. Do not publish, sync or edit the part until it resolves."));
+                }
+
                 Part part = _service.GetPartById(id);
 
                 if (part == null)
@@ -261,6 +274,13 @@ namespace Site_2024.Web.Api.Controllers
                     code = 401;
                     response = new ErrorResponse("You must be logged in.");
                     return StatusCode(code, response);
+                }
+
+                if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                    await _shippingJobStore.HasOpenAsync(id))
+                {
+                    return Conflict(new ErrorResponse(
+                        "A shipping policy update is pending or needs attention. Do not publish, sync or edit the part until it resolves."));
                 }
 
                 Part part = _service.GetPartById(id);
@@ -1515,6 +1535,11 @@ namespace Site_2024.Web.Api.Controllers
                     code = 404;
                     return StatusCode(code, new ErrorResponse("Part not found."));
                 }
+
+                if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                    await _shippingJobStore.HasOpenAsync(id))
+                    return Conflict(new ErrorResponse(
+                        "This part has a shipping-policy update pending or requiring attention. Other edits are temporarily blocked."));
 
                 // Market-driven shipping still has migrated manual collection
                 // membership. A tag update alone does NOT safely reassign it.

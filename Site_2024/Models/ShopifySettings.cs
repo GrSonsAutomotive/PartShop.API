@@ -22,6 +22,12 @@ namespace Site_2024.Web.Api.Models
         public bool AllowMarketDrivenShippingReassignmentWrites { get; set; } = false;
         // Separate DEV-only gate for safely resuming an interrupted migration.
         public bool AllowMarketDrivenShippingRecoveryWrites { get; set; } = false;
+        // Async pilot: schema switch is enabled only AFTER the separate DEV SQL migration.
+        public bool AsyncShippingJobsSchemaReady { get; set; } = false;
+        // Separate write permission. Never enable for production without review.
+        public bool AllowMarketDrivenShippingAsyncReassignmentWrites { get; set; } = false;
+        // Background processing runs independently of browser/session and queue gate.
+        public bool EnableMarketDrivenShippingAsyncWorker { get; set; } = false;
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";
