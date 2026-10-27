@@ -134,6 +134,25 @@ OUTPUT inserted.{Columns.Replace(", ", ", inserted.").Replace("\n            ", 
             return await reader.ReadAsync(ct) ? Map(reader) : null;
         }
 
+        // Renew an exclusive lease during slow Shopify API operations.
+        // An expired or stolen lease cannot be resurrected.
+        public async Task<bool> RenewLeaseAsync(Guid jobId, Guid owner,
+            CancellationToken ct = default)
+        {
+            await using var conn = Connection();
+            await conn.OpenAsync(ct);
+            const string sql = @"
+UPDATE dbo.ShopifyShippingReassignmentJobs
+SET LeaseUntilUtc=DATEADD(MINUTE, 10, SYSUTCDATETIME()),
+    UpdatedUtc=SYSUTCDATETIME()
+WHERE JobId=@id AND LeaseOwner=@owner AND IsOpen=1
+  AND LeaseUntilUtc>SYSUTCDATETIME();";
+            await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 20 };
+            cmd.Parameters.Add("@id", SqlDbType.UniqueIdentifier).Value = jobId;
+            cmd.Parameters.Add("@owner", SqlDbType.UniqueIdentifier).Value = owner;
+            return await cmd.ExecuteNonQueryAsync(ct) == 1;
+        }
+
         public async Task<bool> UpdateAsync(ShopifyShippingReassignmentJob job, Guid owner,
             string status, bool complete, TimeSpan delay, bool? inOld = null,
             bool? inNew = null, string? error = null, bool countCheck = false,
