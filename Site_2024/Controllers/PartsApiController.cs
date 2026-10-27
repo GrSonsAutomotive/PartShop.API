@@ -449,6 +449,11 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(code, response);
                 }
 
+                if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                    await _shippingJobStore.HasOpenAsync(id))
+                    return Conflict(new ErrorResponse(
+                        "A shipping job is pending or needs attention. Manual Shopify publication changes are blocked."));
+
                 ShopifyProductPublishResult result =
                     await _shopifyAdminService.UnpublishProductForPartAsync(part);
 
@@ -470,7 +475,7 @@ namespace Site_2024.Web.Api.Controllers
         [HttpPost("{id:int}/images")]
         [Consumes("multipart/form-data")]
         [Authorize(Policy = "AdminAction")]
-        public ActionResult<BaseResponse> UploadImages(int id, [FromForm] Requests.PartImagesUploadRequest model)
+        public async Task<ActionResult<BaseResponse>> UploadImages(int id, [FromForm] Requests.PartImagesUploadRequest model)
         {
             int code = 200;
             BaseResponse response;
@@ -483,6 +488,11 @@ namespace Site_2024.Web.Api.Controllers
                     code = 401;
                     return StatusCode(code, new ErrorResponse("You must be logged in."));
                 }
+
+                if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                    await _shippingJobStore.HasOpenAsync(id))
+                    return Conflict(new ErrorResponse(
+                        "A shipping job is pending or needs attention. Image changes are temporarily blocked."));
 
                 if (model?.Images == null || model.Images.Count == 0)
                 {
@@ -2098,13 +2108,18 @@ namespace Site_2024.Web.Api.Controllers
 
         [HttpDelete("{id:int}")]
         [Authorize(Policy = "PartsDelete")]
-        public ActionResult<SuccessResponse> Delete(int id)
+        public async Task<ActionResult<SuccessResponse>> Delete(int id)
         {
             int code = 200;
             BaseResponse response;
 
             try
             {
+                if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                    await _shippingJobStore.HasOpenAsync(id))
+                    return Conflict(new ErrorResponse(
+                        "A shipping job is pending or needs attention. Deletion is blocked."));
+
                 _service.DeletePart(id);
                 response = new SuccessResponse();
             }
