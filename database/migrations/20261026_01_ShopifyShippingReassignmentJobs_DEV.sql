@@ -8,8 +8,8 @@
  Safe to re-run. Does not delete or rewrite existing records.
 */
 SET NOCOUNT ON;
-IF DB_NAME() NOT LIKE '%Dev%'
-    THROW 51120, 'DEV-only migration: not connected to a DEV database.', 1;
+IF DB_NAME() <> N'Site_2024_Dev'
+    THROW 51120, 'DEV-only migration: must connect to exactly Site_2024_Dev.', 1;
 IF OBJECT_ID(N'dbo.Parts',N'U') IS NULL
     THROW 51121, 'dbo.Parts is missing.', 1;
 IF OBJECT_ID(N'dbo.ShopifyShippingReassignmentJobs',N'U') IS NULL
