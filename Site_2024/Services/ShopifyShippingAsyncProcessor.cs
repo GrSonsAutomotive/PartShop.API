@@ -56,6 +56,34 @@ namespace Site_2024.Web.Api.Services
             }
         }
 
+        // Check all mapped checkout collections, not just the source and target:
+        // an unexpected third membership can produce an incorrect shipping rate.
+        private async Task VerifyExclusiveCheckoutMembershipAsync(
+            IReadOnlyCollection<ShippingPolicy> policies,
+            string expectedCollectionGid, string productGid)
+        {
+            var mapped = policies
+                .Where(p => p.IsActive && p.AllowsOnlineCheckout)
+                .Select(p => p.ShopifyShippingCollectionGid)
+                .Where(gid => !string.IsNullOrWhiteSpace(gid))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (mapped.Count == 0 || !mapped.Contains(expectedCollectionGid))
+                throw new InvalidOperationException("Target shipping collection is no longer mapped.");
+
+            foreach (string collectionGid in mapped!)
+            {
+                bool contains = await _shopify.CollectionContainsProductAsync(
+                    collectionGid!, productGid);
+                bool shouldContain = string.Equals(collectionGid,
+                    expectedCollectionGid, StringComparison.Ordinal);
+                if (contains != shouldContain)
+                    throw new InvalidOperationException(
+                        "Unexpected Shopify membership across mapped checkout collections; keep product unpublished.");
+            }
+        }
+
         public async Task ProcessAsync(ShopifyShippingReassignmentJob job, Guid owner,
             CancellationToken stoppingToken)
         {
@@ -198,6 +226,9 @@ namespace Site_2024.Web.Api.Services
                     return;
                 }
 
+                await VerifyExclusiveCheckoutMembershipAsync(
+                    policies, target.ShopifyShippingCollectionGid, productGid);
+
                 if (sqlPolicy == job.FromPolicyId)
                 {
                     // The server-side SQL update can complete even if a process
@@ -244,11 +275,8 @@ namespace Site_2024.Web.Api.Services
                         throw new InvalidOperationException("Original draft publication state was not preserved.");
                 }
 
-                if (!await _shopify.CollectionContainsProductAsync(
-                        target.ShopifyShippingCollectionGid, productGid) ||
-                    await _shopify.CollectionContainsProductAsync(
-                        old.ShopifyShippingCollectionGid, productGid))
-                    throw new InvalidOperationException("Shipping membership changed after publication.");
+                await VerifyExclusiveCheckoutMembershipAsync(
+                    policies, target.ShopifyShippingCollectionGid, productGid);
 
                 if (!await _store.UpdateAsync(job, owner, "Completed", true, TimeSpan.Zero,
                         false, true, countCheck: true, ct: stoppingToken))
