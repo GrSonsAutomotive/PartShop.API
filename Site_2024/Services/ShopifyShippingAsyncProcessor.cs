@@ -59,6 +59,7 @@ namespace Site_2024.Web.Api.Services
         public async Task ProcessAsync(ShopifyShippingReassignmentJob job, Guid owner,
             CancellationToken stoppingToken)
         {
+            stoppingToken.ThrowIfCancellationRequested();
             bool safetyWriteStarted = false;
             Part? part = null;
             try
@@ -126,6 +127,7 @@ namespace Site_2024.Web.Api.Services
                         if (!HasTag(snapshot, job.FromPolicyId))
                             throw new InvalidOperationException(
                                 "An active product has an unexpected tag while SQL uses the source policy.");
+                        stoppingToken.ThrowIfCancellationRequested();
                         safetyWriteStarted = true;
                         await _shopify.UnpublishProductForPartAsync(part);
                         snapshot = await _shopify.GetProductShippingSnapshotAsync(job.ShopifyProductId);
@@ -135,6 +137,7 @@ namespace Site_2024.Web.Api.Services
 
                     if (HasTag(snapshot, job.FromPolicyId))
                     {
+                        stoppingToken.ThrowIfCancellationRequested();
                         safetyWriteStarted = true;
                         part.ShippingPolicy = target; // only in memory until membership settles
                         await _shopify.SyncProductTagsForPartAsync(part);
@@ -206,6 +209,7 @@ namespace Site_2024.Web.Api.Services
                         beforeSql.Status != "DRAFT" || beforeSql.PublishedOnOnlineStore ||
                         !HasTag(beforeSql, job.ToPolicyId))
                         throw new InvalidOperationException("Part/Shopify changed before SQL commit.");
+                    stoppingToken.ThrowIfCancellationRequested();
                     safetyWriteStarted = true;
                     _parts.PatchPart(job.PartId,
                         new PartPatchRequest { ShippingPolicyId = job.ToPolicyId },
@@ -225,6 +229,7 @@ namespace Site_2024.Web.Api.Services
                     {
                         // Never restore publication if the membership checks failed.
                         // All checks have passed above.
+                        stoppingToken.ThrowIfCancellationRequested();
                         safetyWriteStarted = true;
                         await _shopify.PublishProductForPartAsync(part!);
                     }
