@@ -17,7 +17,9 @@ namespace Site_2024.Web.Api.Models
         public string? CurrentCollectionGid { get; set; }
         public string? TargetCollectionGid { get; set; }
         public string? ExpectedTargetTag { get; set; }
-        public bool TargetHasMatchingTagSource { get; set; }
+        // Null when the preview short-circuits (e.g., source and target are identical).
+        // False is reserved for an actual failed destination rule check.
+        public bool? TargetHasMatchingTagSource { get; set; }
 
         public string? ShopifyProductStatus { get; set; }
         public bool? ShopifyPublishedOnOnlineStore { get; set; }

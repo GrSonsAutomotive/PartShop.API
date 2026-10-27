@@ -693,7 +693,7 @@ namespace Site_2024.Web.Api.Controllers
                                 && source.TagConditions[0].Values.Count == 1
                                 && string.Equals(source.TagConditions[0].Values[0],
                                     plan.ExpectedTargetTag, StringComparison.OrdinalIgnoreCase)) == true;
-                            if (!plan.TargetHasMatchingTagSource)
+                            if (plan.TargetHasMatchingTagSource != true)
                                 plan.Notes.Add("Target collection lacks a verified, unrestricted shipping-tag source.");
                         }
                     }
@@ -961,7 +961,12 @@ namespace Site_2024.Web.Api.Controllers
 
                 stage = "verify_collection_membership";
                 bool verified = false;
-                for (int attempt = 0; attempt < 8; attempt++)
+                // Shopify's automatic collection sources are eventually consistent.
+                // Our first DEV test failed after just ~7 seconds, although the
+                // membership later converged correctly. Allow up to ~90 seconds,
+                // while the product remains DRAFT and unpublished throughout.
+                const int maxMembershipChecks = 46;
+                for (int attempt = 0; attempt < maxMembershipChecks; attempt++)
                 {
                     bool inNew = await _shopifyAdminService.CollectionContainsProductAsync(
                         target.ShopifyShippingCollectionGid, productGid);
@@ -969,15 +974,28 @@ namespace Site_2024.Web.Api.Controllers
                         current.ShopifyShippingCollectionGid, productGid);
                     if (inNew && !inOld)
                     {
-                        verified = true;
-                        break;
+                        // One more independent read to avoid transiently accepting
+                        // an intermediate collection result.
+                        bool stillInNew = await _shopifyAdminService.CollectionContainsProductAsync(
+                            target.ShopifyShippingCollectionGid, productGid);
+                        bool stillInOld = await _shopifyAdminService.CollectionContainsProductAsync(
+                            current.ShopifyShippingCollectionGid, productGid);
+                        if (stillInNew && !stillInOld)
+                        {
+                            verified = true;
+                            break;
+                        }
                     }
-                    if (attempt < 7)
-                        await Task.Delay(TimeSpan.FromSeconds(1));
+                    if (attempt % 5 == 0)
+                        Logger.LogInformation(
+                            "PartId {PartId} shipping membership settling: check {Check}/{MaxChecks}, target contains: {InNew}, prior contains: {InOld}.",
+                            id, attempt + 1, maxMembershipChecks, inNew, inOld);
+                    if (attempt < maxMembershipChecks - 1)
+                        await Task.Delay(TimeSpan.FromSeconds(2));
                 }
                 if (!verified)
                     throw new ApplicationException(
-                        "Shopify collection membership did not settle correctly; leave unpublished.");
+                        "Shopify collection membership did not settle within the extended verification window; leave unpublished.");
 
                 // Optimistic re-read: detect another admin changing SQL during
                 // Shopify writes. A durable distributed lock is still needed
@@ -1003,8 +1021,12 @@ namespace Site_2024.Web.Api.Controllers
                 if (finalSnapshot.Status != "ACTIVE" || !finalSnapshot.PublishedOnOnlineStore
                     || finalSnapshot.ShippingClassTags.Count != 1
                     || !string.Equals(finalSnapshot.ShippingClassTags[0],
-                        $"ShippingClass_{target.Id}", StringComparison.OrdinalIgnoreCase))
-                    throw new ApplicationException("Post-publication verification failed.");
+                        $"ShippingClass_{target.Id}", StringComparison.OrdinalIgnoreCase)
+                    || !await _shopifyAdminService.CollectionContainsProductAsync(
+                        target.ShopifyShippingCollectionGid, productGid)
+                    || await _shopifyAdminService.CollectionContainsProductAsync(
+                        current.ShopifyShippingCollectionGid, productGid))
+                    throw new ApplicationException("Post-publication Shopify tag or membership verification failed.");
                 restored = true;
 
                 Logger.LogInformation(
