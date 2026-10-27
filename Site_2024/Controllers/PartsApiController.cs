@@ -1059,6 +1059,245 @@ namespace Site_2024.Web.Api.Controllers
             }
         }
 
+
+        // One-off DEV recovery for the interrupted Part #169 reassignment.
+        // Shopify already has ShippingClass_19 and verified memberships, but SQL
+        // still says policy 9. This endpoint NEVER changes Shopify tags/sources.
+        // It is deliberately scoped to the DEV store/product and off by default.
+        [HttpPost("{id:int}/shopify/shipping-reassign-recover")]
+        [Authorize(Policy = "PartsDelete")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingReassignmentResult>>> RecoverDevShippingReassignment(
+            int id, [FromBody] ShopifyShippingReassignmentRequest request,
+            [FromServices] IShippingPoliciesService policiesService,
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
+        {
+            const string devShop = "gr-sons-shipping-dev.myshopify.com";
+            const string expectedProductGid = "gid://shopify/Product/15424506527964";
+            const string expectedOldCollection = "gid://shopify/Collection/511152357596";
+            const string expectedNewCollection = "gid://shopify/Collection/511160320220";
+
+            if (!shopifyOptions.Value.AllowMarketDrivenShippingRecoveryWrites)
+                return Conflict(new ErrorResponse(
+                    "DEV shipping-reassignment recovery is disabled. No changes made."));
+
+            if (!string.Equals(shopifyOptions.Value.ShopDomain, devShop,
+                    StringComparison.OrdinalIgnoreCase))
+                return Conflict(new ErrorResponse(
+                    "This recovery operation is restricted to the Shopify DEV store."));
+
+            if (id != 169 || request == null
+                || request.ExpectedCurrentShippingPolicyId != 9
+                || request.TargetShippingPolicyId != 19
+                || request.ExpectedShopifyProductGid != expectedProductGid
+                || request.Confirmation != "RECOVER_PART_169_SHIPPING_9_TO_19")
+                return BadRequest(new ErrorResponse(
+                    "DEV Part #169 recovery requires the exact expected IDs and confirmation."));
+
+            var user = _authService.GetCurrentUser();
+            if (user == null)
+                return Unauthorized(new ErrorResponse("Admin authentication required."));
+
+            string stage = "preflight";
+            bool sqlWriteAttempted = false;
+            bool publicationAttempted = false;
+            try
+            {
+                if (!shopifyOptions.Value.AllowMarketDrivenShippingPublishing
+                    || !await _shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse(
+                        "Shopify Markets publishing or Market-driven Shipping is not enabled."));
+
+                Part part = _service.GetPartById(id);
+                if (part?.ShopifyProductId != 15424506527964L
+                    || !part.ShopifyVariantId.HasValue
+                    || !part.ShopifyInventoryItemId.HasValue
+                    || part.ShippingPolicy?.Id != 9)
+                    return Conflict(new ErrorResponse(
+                        "Part is no longer in the expected SQL recovery state. No changes made."));
+
+                List<ShippingPolicy> policies = policiesService.GetAll() ?? new();
+                ShippingPolicy? oldPolicy = policies.FirstOrDefault(p => p.Id == 9);
+                ShippingPolicy? newPolicy = policies.FirstOrDefault(p => p.Id == 19);
+                if (oldPolicy?.AllowsOnlineCheckout != true
+                    || newPolicy?.IsActive != true
+                    || newPolicy.AllowsOnlineCheckout != true
+                    || oldPolicy.ShopifyShippingCollectionGid != expectedOldCollection
+                    || newPolicy.ShopifyShippingCollectionGid != expectedNewCollection)
+                    return Conflict(new ErrorResponse(
+                        "Expected DEV shipping policy mappings changed. No changes made."));
+
+                ShopifyShippingCollectionInfo? destination =
+                    await _shopifyAdminService.GetShippingCollectionAsync(expectedNewCollection);
+                bool targetRuleConfirmed = destination?.Sources.Any(source =>
+                    source.SourceType == "CollectionConditionsSource"
+                    && source.TargetType == "PRODUCTS"
+                    && !source.HasExclusions
+                    && !source.HasExplicitSelections
+                    && source.InclusionConditionCount == 1
+                    && source.TagConditions.Count == 1
+                    && source.TagConditions[0].Relation == "TAGGED_WITH"
+                    && source.TagConditions[0].MatchType == "ANY"
+                    && source.TagConditions[0].Values.Count == 1
+                    && string.Equals(source.TagConditions[0].Values[0],
+                        "ShippingClass_19", StringComparison.OrdinalIgnoreCase)) == true;
+                if (!targetRuleConfirmed)
+                    return Conflict(new ErrorResponse(
+                        "Destination collection's automatic tag rule is no longer verified. No changes made."));
+
+                ShopifyProductShippingSnapshot snapshot =
+                    await _shopifyAdminService.GetProductShippingSnapshotAsync(15424506527964L);
+                if (snapshot.ProductGid != expectedProductGid
+                    || snapshot.Status != "DRAFT"
+                    || snapshot.PublishedOnOnlineStore
+                    || snapshot.ShippingClassTags.Count != 1
+                    || !string.Equals(snapshot.ShippingClassTags[0],
+                        "ShippingClass_19", StringComparison.OrdinalIgnoreCase))
+                    return Conflict(new ErrorResponse(
+                        "Shopify product is not safely unpublished with exactly ShippingClass_19. No changes made."));
+
+                // All active checkout policies must have mapped Shopify collections,
+                // and every manual source must be fully scanned. A product in ANY
+                // other checkout collection is a hard stop, not just the old policy.
+                List<ShippingPolicy> checkoutPolicies = policies
+                    .Where(p => p.IsActive && p.AllowsOnlineCheckout).ToList();
+                if (checkoutPolicies.Any(p => string.IsNullOrWhiteSpace(p.ShopifyShippingCollectionGid)))
+                    return Conflict(new ErrorResponse(
+                        "At least one active checkout policy is unmapped. No changes made."));
+
+                foreach (string collectionGid in checkoutPolicies
+                    .Select(p => p.ShopifyShippingCollectionGid!)
+                    .Distinct(StringComparer.Ordinal))
+                {
+                    ShopifyShippingMembershipAudit? audit =
+                        await _shopifyAdminService.AuditShippingCollectionMembershipAsync(collectionGid);
+                    if (audit == null || audit.CollectionGid != collectionGid
+                        || audit.Sources.Any(source =>
+                            source.SourceType != "CollectionConditionsSource"
+                            || source.MoreManualSelections
+                            || source.ManualSelectionProductGids.Contains(expectedProductGid)))
+                        return Conflict(new ErrorResponse(
+                            "Manual source membership cannot be ruled out for all checkout collections. No changes made."));
+
+                    bool contains = await _shopifyAdminService.CollectionContainsProductAsync(
+                        collectionGid, expectedProductGid);
+                    if (contains != (collectionGid == expectedNewCollection))
+                        return Conflict(new ErrorResponse(
+                            "Shopify membership differs from the verified destination-only state. No changes made."));
+                }
+
+                // Final pre-commit recheck. Never update SQL if Shopify/publication
+                // changed while we were scanning the checkout collections.
+                stage = "final_precommit";
+                Part latest = _service.GetPartById(id);
+                ShopifyProductShippingSnapshot latestShopify =
+                    await _shopifyAdminService.GetProductShippingSnapshotAsync(15424506527964L);
+                if (latest.ShippingPolicy?.Id != 9
+                    || latest.ShopifyProductId != 15424506527964L
+                    || latestShopify.Status != "DRAFT"
+                    || latestShopify.PublishedOnOnlineStore
+                    || latestShopify.ShippingClassTags.Count != 1
+                    || !string.Equals(latestShopify.ShippingClassTags[0],
+                        "ShippingClass_19", StringComparison.OrdinalIgnoreCase))
+                    return Conflict(new ErrorResponse(
+                        "SQL or Shopify changed during recovery preflight. No changes made."));
+
+                stage = "sql_commit";
+                sqlWriteAttempted = true;
+                _service.PatchPart(id, new PartPatchRequest { ShippingPolicyId = 19 }, user.Id);
+                Part updated = _service.GetPartById(id);
+                if (updated.ShippingPolicy?.Id != 19
+                    || updated.ShopifyProductId != 15424506527964L)
+                    throw new ApplicationException(
+                        "SQL shipping policy could not be verified after update.");
+
+                // Keep the listing draft until the final checks are complete.
+                stage = "pre_publish_verification";
+                ShopifyProductShippingSnapshot beforePublishing =
+                    await _shopifyAdminService.GetProductShippingSnapshotAsync(15424506527964L);
+                if (beforePublishing.Status != "DRAFT"
+                    || beforePublishing.PublishedOnOnlineStore
+                    || beforePublishing.ShippingClassTags.Count != 1
+                    || !string.Equals(beforePublishing.ShippingClassTags[0],
+                        "ShippingClass_19", StringComparison.OrdinalIgnoreCase)
+                    || !await _shopifyAdminService.CollectionContainsProductAsync(
+                        expectedNewCollection, expectedProductGid)
+                    || await _shopifyAdminService.CollectionContainsProductAsync(
+                        expectedOldCollection, expectedProductGid))
+                    throw new ApplicationException(
+                        "Shopify publication or collection membership changed after SQL commit.");
+
+                stage = "restore_publication";
+                publicationAttempted = true;
+                await _shopifyAdminService.PublishProductForPartAsync(updated);
+                ShopifyProductShippingSnapshot published =
+                    await _shopifyAdminService.GetProductShippingSnapshotAsync(15424506527964L);
+                if (published.Status != "ACTIVE"
+                    || !published.PublishedOnOnlineStore
+                    || published.ShippingClassTags.Count != 1
+                    || !string.Equals(published.ShippingClassTags[0],
+                        "ShippingClass_19", StringComparison.OrdinalIgnoreCase)
+                    || !await _shopifyAdminService.CollectionContainsProductAsync(
+                        expectedNewCollection, expectedProductGid)
+                    || await _shopifyAdminService.CollectionContainsProductAsync(
+                        expectedOldCollection, expectedProductGid))
+                    throw new ApplicationException("Published product failed final shipping-state verification.");
+
+                Logger.LogInformation(
+                    "Completed DEV recovery for Part #169: SQL policy 9 to 19; Shopify publication restored.");
+                return Ok(new ItemResponse<ShopifyShippingReassignmentResult>
+                {
+                    Item = new ShopifyShippingReassignmentResult
+                    {
+                        PartId = id,
+                        PreviousPolicyId = 9,
+                        CurrentPolicyId = 19,
+                        ShopifyProductGid = expectedProductGid,
+                        ShopifyMembershipVerified = true,
+                        LocalPolicyUpdated = true,
+                        PublicationRestored = true,
+                        OriginalPublishedOnOnlineStore = true
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex,
+                    "DEV Part #169 shipping recovery failed at {Stage}. SQL write attempted: {SqlWriteAttempted}; publication attempted: {PublicationAttempted}.",
+                    stage, sqlWriteAttempted, publicationAttempted);
+
+                // Any uncertainty after a write must keep the product out of
+                // checkout. Check the actual SQL state separately; a SQL
+                // exception can happen after a successful server-side commit.
+                bool draftVerified = false;
+                if (sqlWriteAttempted)
+                {
+                    try
+                    {
+                        Part? part = _service.GetPartById(169);
+                        if (part?.ShopifyProductId == 15424506527964L)
+                            await _shopifyAdminService.UnpublishProductForPartAsync(part);
+                        ShopifyProductShippingSnapshot safe =
+                            await _shopifyAdminService.GetProductShippingSnapshotAsync(15424506527964L);
+                        draftVerified = safe.Status == "DRAFT" && !safe.PublishedOnOnlineStore;
+                    }
+                    catch (Exception safetyEx)
+                    {
+                        Logger.LogCritical(safetyEx,
+                            "URGENT: Could not verify DEV Part #169 remained unpublished after recovery failure.");
+                    }
+                }
+                return StatusCode(502, new ErrorResponse(
+                    $"DEV shipping recovery stopped at '{stage}'. " +
+                    (sqlWriteAttempted
+                        ? "SQL commit may have occurred; read SQL state before any retry. "
+                        : "No SQL update was attempted. ") +
+                    (sqlWriteAttempted && !draftVerified
+                        ? "URGENT: Shopify publication could not be verified; inspect immediately. "
+                        : "Any Shopify listing changes were kept unpublished. ") +
+                    "Do not repeat this request blindly."));
+            }
+        }
+
         [HttpPatch("{id:int}")]
         [Authorize(Policy = "AdminAction")]
         public async Task<ActionResult<BaseResponse>> UpdatePart(int id, [FromBody] PartPatchRequest model)

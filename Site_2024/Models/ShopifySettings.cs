@@ -20,6 +20,8 @@ namespace Site_2024.Web.Api.Models
         // unpublish -> tag sync -> collection verify -> SQL patch -> republish.
         // Never enable for production before recovery/volume testing.
         public bool AllowMarketDrivenShippingReassignmentWrites { get; set; } = false;
+        // Separate DEV-only gate for safely resuming an interrupted migration.
+        public bool AllowMarketDrivenShippingRecoveryWrites { get; set; } = false;
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";
