@@ -851,6 +851,10 @@ namespace Site_2024.Web.Api.Controllers
             if (!shopifyOptions.Value.AllowMarketDrivenShippingReassignmentWrites)
                 return Conflict(new ErrorResponse(
                     "Market-driven shipping reassignment writes are disabled. No changes made."));
+            if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                await _shippingJobStore.HasOpenAsync(id))
+                return Conflict(new ErrorResponse(
+                    "Another shipping job is already pending for this part."));
 
             if (request == null
                 || request.Confirmation != "REASSIGN_MARKETS_SHIPPING_POLICY"
@@ -1121,6 +1125,10 @@ namespace Site_2024.Web.Api.Controllers
             if (!shopifyOptions.Value.AllowMarketDrivenShippingRecoveryWrites)
                 return Conflict(new ErrorResponse(
                     "DEV shipping-reassignment recovery is disabled. No changes made."));
+            if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
+                await _shippingJobStore.HasOpenAsync(id))
+                return Conflict(new ErrorResponse(
+                    "A shipping update job is pending; do not run one-off recovery concurrently."));
 
             if (!string.Equals(shopifyOptions.Value.ShopDomain, devShop,
                     StringComparison.OrdinalIgnoreCase))

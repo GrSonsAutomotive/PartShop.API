@@ -255,8 +255,11 @@ namespace Site_2024.Web.Api.Services
             catch (Exception e) when (!stoppingToken.IsCancellationRequested)
             {
                 _log.LogError(e, "Asynchronous shipping job {JobId} failed during reconciliation.", job.JobId);
-                bool draftSafe = !safetyWriteStarted;
-                if (safetyWriteStarted && part?.ShopifyProductId == job.ShopifyProductId)
+                // A job may have changed Shopify in a previous worker pass
+                // before a process restart. Even when THIS pass made no writes,
+                // never assume the product is safe to remain published.
+                bool draftSafe = false;
+                if (part?.ShopifyProductId == job.ShopifyProductId)
                 {
                     try
                     {

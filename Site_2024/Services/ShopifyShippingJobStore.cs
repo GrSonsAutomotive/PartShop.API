@@ -119,7 +119,7 @@ COMMIT;";
             // More than one worker cannot claim the same job within this lease.
             string sql = $@"
 ;WITH n AS (
- SELECT TOP (1) * FROM dbo.ShopifyShippingReassignmentJobs WITH (UPDLOCK, READPAST, ROWLOCK)
+ SELECT TOP (1) * FROM dbo.ShopifyShippingReassignmentJobs WITH (UPDLOCK, READPAST, ROWLOCK, READCOMMITTEDLOCK)
  WHERE IsOpen=1 AND Status IN (N'Queued', N'WaitingForShopify', N'SqlUpdated', N'Publishing')
    AND NextCheckUtc<=SYSUTCDATETIME()
    AND (LeaseUntilUtc IS NULL OR LeaseUntilUtc<SYSUTCDATETIME())
