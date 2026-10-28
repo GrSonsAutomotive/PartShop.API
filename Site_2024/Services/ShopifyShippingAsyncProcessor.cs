@@ -278,9 +278,8 @@ namespace Site_2024.Web.Api.Services
                 await VerifyExclusiveCheckoutMembershipAsync(
                     policies, target.ShopifyShippingCollectionGid, productGid);
 
-                if (!await _store.UpdateAsync(job, owner, "Completed", true, TimeSpan.Zero,
-                        false, true, countCheck: true, ct: stoppingToken))
-                    throw new InvalidOperationException("Worker lost SQL lease before recording completion.");
+                if (!await _store.CompleteAsync(job, owner, stoppingToken))
+                    throw new InvalidOperationException("Worker could not atomically complete shipping job and restore availability.");
 
                 _log.LogInformation("Completed asynchronous shipping job {JobId}: part {PartId} {Old}->{New}.",
                     job.JobId, job.PartId, job.FromPolicyId, job.ToPolicyId);

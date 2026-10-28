@@ -86,14 +86,31 @@ namespace Site_2024.Web.Api.Services
             const string sql = @"
 SET XACT_ABORT ON;
 BEGIN TRAN;
-DECLARE @dbPolicy INT, @dbProduct BIGINT;
-SELECT @dbPolicy=ShippingPolicyId, @dbProduct=ShopifyProductId
+DECLARE @dbPolicy INT, @dbProduct BIGINT, @dbAvailability INT, @dbQuantity INT;
+DECLARE @AvailableId INT, @UnavailableId INT;
+SELECT @AvailableId=Id FROM dbo.Available
+WHERE Id=1 AND LOWER(LTRIM(RTRIM([Status])))=N'available';
+SELECT @UnavailableId=MIN(Id) FROM dbo.Available
+WHERE LOWER(LTRIM(RTRIM([Status])))=N'unavailable'
+  AND IsCustomerVisible=0 AND IsPurchasable=0;
+IF @AvailableId IS NULL OR @UnavailableId IS NULL
+    THROW 51132, 'Available/Unavailable status mapping is not configured safely.', 1;
+SELECT @dbPolicy=ShippingPolicyId, @dbProduct=ShopifyProductId,
+       @dbAvailability=AvailableId, @dbQuantity=Quantity
 FROM dbo.Parts WITH (UPDLOCK, HOLDLOCK) WHERE Id=@PartId;
 IF @dbPolicy IS NULL OR @dbPolicy<>@FromPolicy OR @dbProduct<>@ProductId
     THROW 51130, 'Part changed during shipping request; refresh before retrying.', 1;
+IF @dbAvailability<>@AvailableId OR @dbQuantity<=0
+    THROW 51133, 'Part must be available and in stock before queueing a shipping update.', 1;
 IF EXISTS (SELECT 1 FROM dbo.ShopifyShippingReassignmentJobs WITH (UPDLOCK, HOLDLOCK)
     WHERE PartId=@PartId AND IsOpen=1)
     THROW 51131, 'Shipping update already pending or needs attention.', 1;
+-- A failed/duplicate job insert rolls back the availability change too.
+UPDATE dbo.Parts
+SET AvailableId=@UnavailableId, DateModified=SYSUTCDATETIME(), LastMovedBy=@UserId
+WHERE Id=@PartId AND AvailableId=@AvailableId;
+IF @@ROWCOUNT<>1
+    THROW 51134, 'Failed to make part unavailable while queueing shipping update.', 1;
 INSERT dbo.ShopifyShippingReassignmentJobs
 (JobId, PartId, ShopifyProductId, FromPolicyId, ToPolicyId,
  RequestedByUserId, OriginalPublishedOnOnlineStore)
@@ -186,5 +203,56 @@ WHERE JobId=@id AND LeaseOwner=@owner AND LeaseUntilUtc>SYSUTCDATETIME();";
             cmd.Parameters.Add("@owner", SqlDbType.UniqueIdentifier).Value = owner;
             return await cmd.ExecuteNonQueryAsync(ct) == 1;
         }
+        // Availability is restored ONLY when Shopify is verified and the job completes.
+        // A single transaction prevents job completion without restoring availability.
+        // Failed or interrupted jobs keep the listing unavailable.
+        public async Task<bool> CompleteAsync(ShopifyShippingReassignmentJob job,
+            Guid owner, CancellationToken ct = default)
+        {
+            await using var conn = Connection();
+            await conn.OpenAsync(ct);
+            const string sql = @"
+SET XACT_ABORT ON;
+BEGIN TRAN;
+DECLARE @AvailableId INT, @UnavailableId INT, @dbPolicy INT, @dbAvailability INT;
+SELECT @AvailableId=Id FROM dbo.Available
+WHERE Id=1 AND LOWER(LTRIM(RTRIM([Status])))=N'available';
+SELECT @UnavailableId=MIN(Id) FROM dbo.Available
+WHERE LOWER(LTRIM(RTRIM([Status])))=N'unavailable'
+  AND IsCustomerVisible=0 AND IsPurchasable=0;
+IF @AvailableId IS NULL OR @UnavailableId IS NULL
+    THROW 51135, 'Available/Unavailable status mapping changed during shipping update.', 1;
+-- Match the part-row locking order used by EnqueueAsync.
+SELECT @dbPolicy=ShippingPolicyId, @dbAvailability=AvailableId
+FROM dbo.Parts WITH (UPDLOCK, HOLDLOCK) WHERE Id=@PartId;
+IF @dbPolicy<>@ToPolicyId OR @dbAvailability<>@UnavailableId
+    THROW 51136, 'Part shipping or availability state changed before completion.', 1;
+-- Zero-stock products remain unavailable even after the shipping job completes.
+UPDATE dbo.Parts
+SET AvailableId=CASE WHEN Quantity>0 THEN @AvailableId ELSE @UnavailableId END,
+    DateModified=SYSUTCDATETIME(), LastMovedBy=@UserId
+WHERE Id=@PartId AND ShippingPolicyId=@ToPolicyId AND AvailableId=@UnavailableId;
+IF @@ROWCOUNT<>1
+    THROW 51137, 'Could not restore part availability.', 1;
+UPDATE dbo.ShopifyShippingReassignmentJobs
+SET Status=N'Completed', IsOpen=0, CheckCount=CheckCount+1,
+    OldCollectionContainsProduct=0, NewCollectionContainsProduct=1,
+    NextCheckUtc=SYSUTCDATETIME(), LeaseOwner=NULL, LeaseUntilUtc=NULL,
+    LastError=NULL, UpdatedUtc=SYSUTCDATETIME(), CompletedUtc=SYSUTCDATETIME()
+WHERE JobId=@JobId AND PartId=@PartId AND ToPolicyId=@ToPolicyId
+  AND IsOpen=1 AND LeaseOwner=@Owner AND LeaseUntilUtc>SYSUTCDATETIME();
+IF @@ROWCOUNT<>1
+    THROW 51138, 'Worker lost SQL lease before committing shipping job and availability.', 1;
+COMMIT;
+SELECT CAST(1 AS BIT);";
+            await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 30 };
+            cmd.Parameters.Add("@JobId", SqlDbType.UniqueIdentifier).Value = job.JobId;
+            cmd.Parameters.Add("@PartId", SqlDbType.Int).Value = job.PartId;
+            cmd.Parameters.Add("@ToPolicyId", SqlDbType.Int).Value = job.ToPolicyId;
+            cmd.Parameters.Add("@UserId", SqlDbType.Int).Value = job.RequestedByUserId;
+            cmd.Parameters.Add("@Owner", SqlDbType.UniqueIdentifier).Value = owner;
+            return Convert.ToBoolean(await cmd.ExecuteScalarAsync(ct));
+        }
+
     }
 }

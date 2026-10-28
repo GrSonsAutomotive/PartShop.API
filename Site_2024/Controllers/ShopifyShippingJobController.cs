@@ -111,7 +111,7 @@ namespace Site_2024.Web.Api.Controllers
                         "Job may have been queued but status could not be read; do not submit again."));
                 return Accepted(new ItemResponse<ShopifyShippingReassignmentJob> { Item = job });
             }
-            catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 2601 or 2627 or 51130 or 51131)
+            catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 2601 or 2627 or 51130 or 51131 or 51132 or 51133 or 51134)
             {
                 return Conflict(new ErrorResponse(ex.Message));
             }
