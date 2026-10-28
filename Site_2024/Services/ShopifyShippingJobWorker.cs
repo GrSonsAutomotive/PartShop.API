@@ -71,8 +71,7 @@ namespace Site_2024.Web.Api.Services
                     var config = _options.Value;
                     if (config.AsyncShippingJobsSchemaReady &&
                         config.EnableMarketDrivenShippingAsyncWorker &&
-                        string.Equals(config.ShopDomain,
-                            "gr-sons-shipping-dev.myshopify.com", StringComparison.OrdinalIgnoreCase))
+                        config.IsAsyncShippingStoreAuthorized())
                     {
                         using var scope = _scopeFactory.CreateScope();
                         var store = scope.ServiceProvider.GetRequiredService<ShopifyShippingJobStore>();
@@ -106,7 +105,7 @@ namespace Site_2024.Web.Api.Services
                 }
                 catch (Exception ex)
                 {
-                    _log.LogError(ex, "DEV Shopify shipping background worker tick failed.");
+                    _log.LogError(ex, "Shopify shipping background worker tick failed.");
                     await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
                 }
             }

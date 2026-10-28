@@ -7,7 +7,7 @@ namespace Site_2024.Web.Api.Services
 {
     // A scoped reconciler: each pass checks Shopify's actual state and the SQL
     // part, rather than trusting an in-memory stage. Restart-safe and resumable.
-    // This is an intentionally DEV-store-restricted pilot, not a production cutover.
+    // Production activation requires separately configured shop identity and release flags.
     public sealed class ShopifyShippingAsyncProcessor
     {
         private readonly ShopifyShippingJobStore _store;
@@ -97,10 +97,8 @@ namespace Site_2024.Web.Api.Services
                 if (!_settings.AsyncShippingJobsSchemaReady ||
                     !_settings.EnableMarketDrivenShippingAsyncWorker ||
                     !_settings.AllowMarketDrivenShippingPublishing ||
-                    !string.Equals(_settings.ShopDomain,
-                        "gr-sons-shipping-dev.myshopify.com",
-                        StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("DEV shipping job worker configuration is not authorized.");
+                    !_settings.IsAsyncShippingStoreAuthorized())
+                    throw new InvalidOperationException("Shipping job worker/store configuration is not authorized.");
 
                 part = _parts.GetPartById(job.PartId);
                 if (part?.ShopifyProductId != job.ShopifyProductId ||

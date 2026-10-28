@@ -10,7 +10,7 @@ using Site_2024.Web.Api.Services;
 
 namespace Site_2024.Web.Api.Controllers
 {
-    // Independent DEV-only queue. The original synchronous pilot stays disabled.
+    // SQL-backed queue. All writes require explicit store authorization and feature gates.
     [ApiController]
     [Route("api/home/{partId:int}/shopify/shipping-reassignment-job")]
     public sealed class ShopifyShippingJobController : ControllerBase
@@ -56,9 +56,9 @@ namespace Site_2024.Web.Api.Controllers
                 !_settings.EnableMarketDrivenShippingAsyncWorker)
                 return Conflict(new ErrorResponse(
                     "Asynchronous shipping reassignment is disabled until the DEV job migration and worker are enabled. No changes made."));
-            if (!string.Equals(_settings.ShopDomain, "gr-sons-shipping-dev.myshopify.com",
-                    StringComparison.OrdinalIgnoreCase))
-                return Conflict(new ErrorResponse("This queued shipping pilot is restricted to the DEV Shopify store."));
+            if (!_settings.IsAsyncShippingStoreAuthorized())
+                return Conflict(new ErrorResponse(
+                    "Shipping jobs are not authorized for the configured Shopify store. No changes made."));
             if (request == null ||
                 request.Confirmation != "REASSIGN_MARKETS_SHIPPING_POLICY" ||
                 request.ExpectedCurrentShippingPolicyId <= 0 ||
