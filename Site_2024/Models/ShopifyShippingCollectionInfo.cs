@@ -133,6 +133,19 @@ namespace Site_2024.Web.Api.Models
         public bool MoreManualSelections { get; set; }
     }
 
+    // Read-only, bounded Shopify connection page. Cursors belong to ONE
+    // connection only: collection, source-products, or source-selections.
+    public class ShopifyShippingMembershipPage
+    {
+        public bool ReadOnly { get; set; } = true;
+        public string CollectionGid { get; set; } = string.Empty;
+        public string? SourceGid { get; set; }
+        public string Kind { get; set; } = string.Empty;
+        public List<string> ProductGids { get; set; } = new();
+        public bool HasNextPage { get; set; }
+        public string? EndCursor { get; set; }
+    }
+
     public class ShopifyShippingManualSelectionRemoveRequest
     {
         public string ProductGid { get; set; } = string.Empty;
