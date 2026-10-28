@@ -41,3 +41,25 @@
 - Existing DEV-only recovery path needs removal/review before code merge.
 
 **Schema migrations 01/02 were run and verified in production after the safety copy. Do not flip the Shopify Upgrade control, enable write flags, or merge to production until the remaining preflight succeeds.**
+
+## Observed production checkout baseline (before Shopify Upgrade)
+
+Captured from three-item customer checkout screenshots on 2026-10-27 (America/Los_Angeles).
+These screenshots verify rates for the tested cart only; they do not establish all
+shipping zones or map each product to a specific policy ID.
+
+| Cart / selected methods | Shipping total | Order total |
+| --- | ---: | ---: |
+| Three items, Standard free shipping on each shipment | $0.00 | $397.85 |
+| Three items, paid Economy method on each shipment | $85.00 | $482.85 |
+
+Items and paid Economy rates visible:
+- NEW Porsche 968 Transmission Shim .50mm — $15.00.
+- Porsche 924 / 944 Center Dash AC Air Vent Outlet — $15.00.
+- Porsche 912 Engine Suspension Mounting Bracket — $55.00.
+- Shipment 2 also showed an Express $50.00 option.
+
+**Verification after the upgrade:** repeat with exactly these three products,
+quantities, destination/ZIP, shipping methods and market. The shipping baseline is
+not comparable if the address, product policy, or rate selection changes.
+Do not place a paid order. Save separate rate snapshots for each of the 11 policy groups.
