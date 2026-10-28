@@ -7,6 +7,7 @@ on:
       - hotfix/shipping-tag-only-batch-safety-20261028
       - feat/shipping-full-membership-audit-20261028
       - feat/legacy-variant-source-readiness-20261028
+      - feat/verify-shopify-variant-membership-20261028
 
 permissions:
   contents: read
