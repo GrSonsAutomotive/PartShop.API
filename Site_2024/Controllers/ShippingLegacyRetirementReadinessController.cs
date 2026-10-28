@@ -44,6 +44,8 @@ namespace Site_2024.Web.Api.Controllers
             public int CollectionProducts { get; set; }
             public int ManualSourceProducts { get; set; }
             public int ManualSelections { get; set; }
+            public int ExactVariantSelectionsVerified { get; set; }
+            public int SoleProductVariantsVerified { get; set; }
             public int AutomaticSourceProducts { get; set; }
             public List<string> Problems { get; set; } = new();
             public List<PartReference> RecoveryReference { get; set; } = new();
@@ -73,7 +75,8 @@ ORDER BY Id;", db);
         }
 
         private async Task<HashSet<string>> ReadAllAsync(
-            string collectionGid, string kind, string? sourceGid, CancellationToken ct)
+            string collectionGid, string kind, string? sourceGid, CancellationToken ct,
+            Dictionary<string, List<string>?>? variantSelections = null)
         {
             var members = new HashSet<string>(StringComparer.Ordinal);
             var usedCursors = new HashSet<string>(StringComparer.Ordinal);
@@ -90,6 +93,19 @@ ORDER BY Id;", db);
                 foreach (string gid in result.ProductGids)
                     if (!members.Add(gid))
                         throw new InvalidOperationException("Duplicate product in Shopify membership pagination.");
+
+                if (variantSelections != null)
+                {
+                    if (kind != "selections" || result.Selections.Count != result.ProductGids.Count)
+                        throw new InvalidOperationException("Shopify selection/variant details were incomplete.");
+                    for (int i = 0; i < result.Selections.Count; i++)
+                    {
+                        var selection = result.Selections[i];
+                        if (selection.ProductGid != result.ProductGids[i]
+                            || !variantSelections.TryAdd(selection.ProductGid, selection.VariantGids))
+                            throw new InvalidOperationException("Shopify selected variant data did not match members.");
+                    }
+                }
 
                 if (!result.HasNextPage)
                     return members;
@@ -168,12 +184,52 @@ ORDER BY Id;", db);
 
                 var collectionIds = await ReadAllAsync(report.CollectionGid, "collection", null, ct);
                 var manualIds = await ReadAllAsync(report.CollectionGid, "source", report.OriginalVariantSourceGid, ct);
-                var selectionIds = await ReadAllAsync(report.CollectionGid, "selections", report.OriginalVariantSourceGid, ct);
+                var variantSelections = new Dictionary<string, List<string>?>(StringComparer.Ordinal);
+                var selectionIds = await ReadAllAsync(report.CollectionGid, "selections",
+                    report.OriginalVariantSourceGid, ct, variantSelections);
                 var automaticIds = await ReadAllAsync(report.CollectionGid, "source", report.AutomaticProductSourceGid, ct);
 
                 report.ManualSourceProducts = manualIds.Count;
                 report.ManualSelections = selectionIds.Count;
                 report.AutomaticSourceProducts = automaticIds.Count;
+
+                // Shopify's migrated source targets VARIANTS, while the new
+                // tag rule targets PRODUCTS. Product-level equality alone
+                // cannot prove the same precise legacy variant selections.
+                // Fail closed unless each SQL-linked variant is explicitly
+                // the ONLY selected variant for its Shopify product.
+                report.ExactVariantSelectionsVerified = report.RecoveryReference.Count(p =>
+                    variantSelections.TryGetValue($"gid://shopify/Product/{p.ShopifyProductId}",
+                        out List<string>? selected) && selected != null
+                    && selected.Count == 1 &&
+                    selected[0] == $"gid://shopify/ProductVariant/{p.ShopifyVariantId}");
+
+                if (report.ExactVariantSelectionsVerified != report.SqlLinkedProducts
+                    || variantSelections.Count != report.SqlLinkedProducts)
+                    report.Problems.Add("Legacy variant selections differ from SQL variant identities.");
+
+                // A PRODUCTS-targeted tag rule includes all Shopify variants
+                // of an included product. Only prove parity when each product
+                // truly has one variant and it is precisely SQL's variant.
+                for (int offset = 0; offset < report.RecoveryReference.Count; offset += 30)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var batch = report.RecoveryReference.Skip(offset).Take(30).ToList();
+                    var productGids = batch
+                        .Select(p => $"gid://shopify/Product/{p.ShopifyProductId}").ToList();
+                    var soleVariants = await _shopify.GetSoleProductVariantsAsync(productGids);
+
+                    foreach (var part in batch)
+                    {
+                        string productGid = $"gid://shopify/Product/{part.ShopifyProductId}";
+                        if (soleVariants.TryGetValue(productGid, out string? variantGid)
+                            && variantGid == $"gid://shopify/ProductVariant/{part.ShopifyVariantId}")
+                            report.SoleProductVariantsVerified++;
+                    }
+                }
+
+                if (report.SoleProductVariantsVerified != report.SqlLinkedProducts)
+                    report.Problems.Add("A Shopify product has more than one variant or differs from its SQL variant.");
 
                 if (report.CollectionProducts != expected.Count
                     || !collectionIds.SetEquals(expected)

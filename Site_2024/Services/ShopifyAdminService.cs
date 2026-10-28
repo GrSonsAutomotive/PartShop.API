@@ -349,6 +349,69 @@ query SiteShippingMembershipAudit($id: ID!) {
 
 
 
+
+        // Each SQL Part maps to one Shopify variant. Confirm no additional
+        // Shopify variants would unexpectedly enter a PRODUCTS-targeted tag
+        // collection after the old VARIANTS-targeted source is retired.
+        public async Task<Dictionary<string, string?>> GetSoleProductVariantsAsync(
+            IReadOnlyList<string> productGids)
+        {
+            if (productGids == null || productGids.Count == 0 || productGids.Count > 30
+                || productGids.Distinct(StringComparer.Ordinal).Count() != productGids.Count
+                || productGids.Any(gid => string.IsNullOrWhiteSpace(gid)
+                    || !gid.StartsWith("gid://shopify/Product/", StringComparison.Ordinal)
+                    || !gid["gid://shopify/Product/".Length..].All(char.IsDigit)))
+                throw new ArgumentException("Provide 1-30 distinct valid Shopify product GIDs.", nameof(productGids));
+
+            const string query = @"
+query SiteSoleProductVariantAudit($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product {
+      id
+      variants(first: 2) {
+        nodes { id }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(query,
+                new { ids = productGids }, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify variant count audit failed: {errors}");
+
+            JsonElement nodes = root.GetProperty("data").GetProperty("nodes");
+            if (nodes.GetArrayLength() != productGids.Count)
+                throw new ApplicationException("Shopify product variant count response was incomplete.");
+
+            var found = new Dictionary<string, string?>(StringComparer.Ordinal);
+            int i = 0;
+            foreach (JsonElement product in nodes.EnumerateArray())
+            {
+                string expectedId = productGids[i++];
+                if (product.ValueKind != JsonValueKind.Object ||
+                    product.GetProperty("id").GetString() != expectedId)
+                    throw new ApplicationException("Shopify variant audit returned an unexpected product.");
+
+                JsonElement variants = product.GetProperty("variants");
+                JsonElement members = variants.GetProperty("nodes");
+                bool exactlyOne = members.GetArrayLength() == 1 &&
+                    !variants.GetProperty("pageInfo").GetProperty("hasNextPage").GetBoolean();
+                string? singleVariantGid = exactlyOne
+                    ? members[0].GetProperty("id").GetString()
+                    : null;
+
+                if (singleVariantGid != null &&
+                    !singleVariantGid.StartsWith("gid://shopify/ProductVariant/", StringComparison.Ordinal))
+                    throw new ApplicationException("Shopify product had an invalid variant identifier.");
+
+                found.Add(expectedId, singleVariantGid);
+            }
+            return found;
+        }
+
+
         // Bounded read-only paginator for full production reconciliation.
         // Each request queries one Shopify connection with its OWN cursor.
         // A source is first confirmed to belong to the requested collection.
@@ -412,7 +475,7 @@ query SiteSourceSelectionPage($id: ID!, $after: String) {
       id
       inclusion {
         selections(first: 100, after: $after) {
-          nodes { product { id } }
+          nodes { product { id } variantIds }
           pageInfo { hasNextPage endCursor }
         }
       }
@@ -463,6 +526,31 @@ query SiteSourceSelectionPage($id: ID!, $after: String) {
                     || !productId.StartsWith("gid://shopify/Product/", StringComparison.Ordinal))
                     throw new ApplicationException("Shopify paginated shipping audit returned an invalid product.");
                 result.ProductGids.Add(productId);
+                if (kind == "selections")
+                {
+                    JsonElement variantIds = item.GetProperty("variantIds");
+                    List<string>? selectedVariants = null;
+                    if (variantIds.ValueKind == JsonValueKind.Array)
+                    {
+                        selectedVariants = new List<string>();
+                        foreach (JsonElement variant in variantIds.EnumerateArray())
+                        {
+                            string? variantGid = variant.GetString();
+                            if (string.IsNullOrWhiteSpace(variantGid) ||
+                                !variantGid.StartsWith("gid://shopify/ProductVariant/", StringComparison.Ordinal))
+                                throw new ApplicationException("Shopify selection has an invalid variant GID.");
+                            selectedVariants.Add(variantGid);
+                        }
+                    }
+                    else if (variantIds.ValueKind != JsonValueKind.Null)
+                        throw new ApplicationException("Shopify selection has an unexpected variant list.");
+
+                    result.Selections.Add(new ShopifyShippingSelectedVariant
+                    {
+                        ProductGid = productId,
+                        VariantGids = selectedVariants
+                    });
+                }
             }
 
             if (result.HasNextPage && string.IsNullOrWhiteSpace(result.EndCursor))

@@ -142,8 +142,17 @@ namespace Site_2024.Web.Api.Models
         public string? SourceGid { get; set; }
         public string Kind { get; set; } = string.Empty;
         public List<string> ProductGids { get; set; } = new();
+        // Populated only when Kind == "selections". Null VariantGids means
+        // Shopify did not give an explicit per-variant selection.
+        public List<ShopifyShippingSelectedVariant> Selections { get; set; } = new();
         public bool HasNextPage { get; set; }
         public string? EndCursor { get; set; }
+    }
+
+    public class ShopifyShippingSelectedVariant
+    {
+        public string ProductGid { get; set; } = string.Empty;
+        public List<string>? VariantGids { get; set; }
     }
 
     public class ShopifyShippingManualSelectionRemoveRequest
