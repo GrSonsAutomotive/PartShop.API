@@ -106,11 +106,19 @@ namespace Site_2024.Web.Api.Controllers
         }
 
         [HttpPost("{id:int}/shopify-collection")]
-        [Authorize(Policy = "AdminAction")]
+        [Authorize(Policy = "PartsDelete")]
         public async Task<ActionResult<ItemResponse<ShopifyCollectionCreateResult>>> CreateShippingCollection(
             int id,
-            [FromServices] IShopifyAdminService shopifyAdminService)
+            [FromServices] IShopifyAdminService shopifyAdminService,
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
         {
+            // Creating checkout shipping collections is a Shopify write.
+            // Never allow it during the production pre-upgrade deployment.
+            if (!shopifyOptions.Value.AllowMarketDrivenShippingCollectionSourceWrites ||
+                !shopifyOptions.Value.IsAsyncShippingStoreAuthorized())
+                return Conflict(new ErrorResponse(
+                    "Shopify shipping collection creation is disabled for this environment."));
+
             ShippingPolicy? policy = _service.GetAll().FirstOrDefault(item => item.Id == id);
             if (policy == null)
                 return NotFound(new ErrorResponse("Active shipping policy was not found."));
