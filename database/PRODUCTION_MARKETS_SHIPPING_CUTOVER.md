@@ -8,7 +8,7 @@
 - Existing production inventory baseline from SQL: 3,064 parts; 3,063 Shopify-linked; 1 local-only.
 - Checkout-enabled shipping policy IDs 9–19 (11 groups); contact-only policy 20 (16 parts).
 - Existing delivery profiles and Shopify product IDs MUST remain intact until Shopify's supported migration.
-- Production myshopify.com domain has **not been independently verified**. Do not guess it or enable jobs.
+- Production Shopify store identity verified from Azure App Service settings: `bx7ns0-2i.myshopify.com`. DEV is `gr-sons-shipping-dev.myshopify.com`; do not confuse them.
 
 ## Changes packaged here
 
@@ -21,7 +21,7 @@
 
 1. Export SQL baseline, duplicate Shopify ID report, and a recoverable Azure SQL backup/export; verify restore plan. Keep this record.
 2. Inventory all current production US/International Markets, 11 custom shipping profiles, location settings, shipping rates and combinations; verify actual test checkouts before upgrade.
-3. Confirm the genuine production `*.myshopify.com` domain and environment settings. Ensure `REACT_APP_API_HOST_PREFIX=https://api.grsonsautomotive.com` on the release frontend. Do not copy DEV .env.
+3. Production shop domain verified as `bx7ns0-2i.myshopify.com`. During cutover, independently reconfirm Azure `ShopifySettings__ShopDomain` matches it. Ensure `REACT_APP_API_HOST_PREFIX=https://api.grsonsautomotive.com` on the release frontend. Do not copy DEV `.env`.
 4. Complete API code review, compile/test in an isolated non-production pipeline, and remove hard-coded DEV one-off recovery endpoints before merging.
 5. Before applying SQL changes, confirm `ShopifySettings__AsyncShippingJobsSchemaReady=false`, `ShopifySettings__EnableMarketDrivenShippingAsyncWorker=false`, `ShopifySettings__AllowMarketDrivenShippingAsyncReassignmentWrites=false`, `ShopifySettings__AllowMarketDrivenShippingReassignmentWrites=false`, `ShopifySettings__AllowMarketDrivenShippingRecoveryWrites=false`, `ShopifySettings__AllowMarketDrivenShippingCollectionMembershipWrites=false`, and `ShopifySettings__AllowMarketDrivenShippingCollectionSourceWrites=false`. `AllowProductionAsyncShipping=false` remains false through migration.
 6. Run schema migrations individually in SSMS, only after reviewing the baseline and exact database guards. These do not modify parts or Shopify.
@@ -35,7 +35,7 @@
 
 ## Pending blockers
 
-- Production Shopify store identity and Shopify upgrade contents not yet verified.
+- Production Shopify store identity is verified; Shopify upgrade contents and post-upgrade shipping rates/membership are **not** verified.
 - Tags-only backfill staged with separate disabled-by-default authorization; requires build, DEV verification, and limited production canary. Migrated manual-selection handling for large collections remains unverified.
 - Production-suitable worker restart/failure testing still pending.
 - Existing DEV-only recovery path needs removal/review before code merge.
