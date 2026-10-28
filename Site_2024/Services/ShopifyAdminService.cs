@@ -1099,32 +1099,32 @@ query SiteShippingCollectionProductMembership($id: ID!, $after: String) {
                 throw new InvalidOperationException(
                     "Conflicting Shopify shipping-class tag; requires human review.");
 
-            string[] after = before
-                .Where(x => !x.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
-                .Concat(desired == null ? Array.Empty<string>() : new[] { desired })
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-
-            if (new HashSet<string>(before, StringComparer.OrdinalIgnoreCase).SetEquals(after)
-                && before.Length == after.Length)
+            // Conflicting classes are rejected above. The migration only needs
+            // to ADD a missing tag; do not replace the Shopify product tag list.
+            // tagsAdd is additive, preserving all unrelated tags even if other
+            // Shopify integrations write them concurrently.
+            if (desired == null || existingShipping.Length != 0)
                 return false;
 
             const string mutation = @"
-mutation BackfillOnlyShippingClassTag($product: ProductUpdateInput!) {
-  productUpdate(product: $product) {
-    product { id tags }
+mutation BackfillOnlyShippingClassTag($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) {
+    node { id }
     userErrors { field message }
   }
 }";
             using JsonDocument doc = await SendGraphQlAsync(mutation,
-                new { product = new { id = gid, tags = after } });
+                new { id = gid, tags = new[] { desired } });
             var root = doc.RootElement;
             if (root.TryGetProperty("errors", out JsonElement errors))
                 throw new ApplicationException($"Tag-only update failed: {errors}");
-            var payload = root.GetProperty("data").GetProperty("productUpdate");
+            var payload = root.GetProperty("data").GetProperty("tagsAdd");
             ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shipping-class backfill failed");
+
             string[] verified = await GetProductTagsAsync(gid);
-            if (verified.Length != after.Length ||
-                !new HashSet<string>(verified, StringComparer.OrdinalIgnoreCase).SetEquals(after))
+            if (verified.Count(x => string.Equals(x, desired,
+                    StringComparison.OrdinalIgnoreCase)) != 1 ||
+                before.Any(t => !verified.Contains(t, StringComparer.OrdinalIgnoreCase)))
                 throw new InvalidOperationException("Tag-only update did not verify.");
             return true;
         }
