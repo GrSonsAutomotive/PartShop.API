@@ -231,6 +231,42 @@ namespace Site_2024.Web.Api.Controllers
             }
         }
 
+        // Read-only, one-connection-at-a-time pagination for complete shipping
+        // membership reconciliation. No Shopify or SQL writes.
+        // Client must exhaust each independent cursor before comparing sets.
+        [HttpGet("shopify/collection-membership-page")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingMembershipPage>>> GetCollectionMembershipPage(
+            [FromQuery] string collectionGid,
+            [FromQuery] string kind,
+            [FromQuery] string? sourceGid,
+            [FromQuery] string? after,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid)
+                || string.IsNullOrWhiteSpace(kind))
+                return BadRequest(new ErrorResponse("CollectionGid and kind are required."));
+            try
+            {
+                ShopifyShippingMembershipPage? page =
+                    await shopifyAdminService.GetShippingMembershipPageAsync(
+                        collectionGid, sourceGid, kind.Trim().ToLowerInvariant(), after);
+                if (page == null)
+                    return NotFound(new ErrorResponse("Collection or source not found in Shopify."));
+                return Ok(new ItemResponse<ShopifyShippingMembershipPage> { Item = page });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Unable to page Shopify shipping collection membership.");
+                return StatusCode(502, new ErrorResponse(
+                    "Unable to retrieve complete Shopify shipping membership page."));
+            }
+        }
+
         // Adopt a Shopify-created collection; never create or modify a collection here.
         // Collection source updates are a separate, explicitly verified operation.
         [HttpPost("{id:int}/shopify-collection/adopt")]
