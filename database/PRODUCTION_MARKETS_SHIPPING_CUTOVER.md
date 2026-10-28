@@ -63,3 +63,29 @@ Items and paid Economy rates visible:
 quantities, destination/ZIP, shipping methods and market. The shipping baseline is
 not comparable if the address, product policy, or rate selection changes.
 Do not place a paid order. Save separate rate snapshots for each of the 11 policy groups.
+
+
+## 2026-10-27: Shopify Markets upgrade / initial source audit
+
+Verified through the **production API**:
+- `GET /api/shippingpolicies/shopify/mode`: `item: true`.
+- `GET /api/shippingpolicies/shopify/collections`: `hasNextPage: false` (complete list).
+- All **11** checkout collections have matching product counts to the pre-upgrade SQL baseline (**3,047**).
+- Every checkout collection retains one **VARIANTS**-targeted **explicit selection** source, without tag conditions. This is *not* an automated tag rule. Do NOT delete manual/variant sources or run tag backfill until checkout rates, full membership, and a safe bulk migration are verified.
+- The `[Shipping] Calculated shipping` and `[Shipping] General profile` collections contain zero products in the result; preserve contact-only policy 20 (16 Shopify-linked parts).
+
+| SQL policy | Title suffix | Checkout linked count | Shopify collection GID |
+| ---: | --- | ---: | --- |
+| 9 | 15/17 | 1351 | `gid://shopify/Collection/492602359994` |
+| 10 | 15/27 | 1321 | `gid://shopify/Collection/492602392762` |
+| 11 | 25/39 | 141 | `gid://shopify/Collection/492602425530` |
+| 12 | 35/49 | 24 | `gid://shopify/Collection/492602491066` |
+| 13 | 45/59 | 39 | `gid://shopify/Collection/492602523834` |
+| 14 | 55/69 | 62 | `gid://shopify/Collection/492602556602` |
+| 15 | 65/79 | 32 | `gid://shopify/Collection/492602589370` |
+| 16 | 75/89 | 25 | `gid://shopify/Collection/492602622138` |
+| 17 | 85/99 | 34 | `gid://shopify/Collection/492602654906` |
+| 18 | 99/150 No free | 13 | `gid://shopify/Collection/492602687674` |
+| 19 | 25/69 no free | 5 | `gid://shopify/Collection/492602458298` |
+
+Migration sequencing: verify **post-upgrade checkout first**, then adopt *existing* collections to SQL one at a time through read/validated adoption endpoint, with all automated write flags off. Adoption maps IDs in SQL; it must not alter Shopify sources. Bulk transition to tag-based sources requires complete audit (the existing limited 10-product sample is insufficient for 1,351-/1,321-product collections).
