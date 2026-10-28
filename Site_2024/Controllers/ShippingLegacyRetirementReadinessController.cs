@@ -45,6 +45,7 @@ namespace Site_2024.Web.Api.Controllers
             public int ManualSourceProducts { get; set; }
             public int ManualSelections { get; set; }
             public int ExactVariantSelectionsVerified { get; set; }
+            public int SoleProductVariantsVerified { get; set; }
             public int AutomaticSourceProducts { get; set; }
             public List<string> Problems { get; set; } = new();
             public List<PartReference> RecoveryReference { get; set; } = new();
@@ -206,6 +207,29 @@ ORDER BY Id;", db);
                 if (report.ExactVariantSelectionsVerified != report.SqlLinkedProducts
                     || variantSelections.Count != report.SqlLinkedProducts)
                     report.Problems.Add("Legacy variant selections differ from SQL variant identities.");
+
+                // A PRODUCTS-targeted tag rule includes all Shopify variants
+                // of an included product. Only prove parity when each product
+                // truly has one variant and it is precisely SQL's variant.
+                for (int offset = 0; offset < report.RecoveryReference.Count; offset += 30)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var batch = report.RecoveryReference.Skip(offset).Take(30).ToList();
+                    var productGids = batch
+                        .Select(p => $"gid://shopify/Product/{p.ShopifyProductId}").ToList();
+                    var soleVariants = await _shopify.GetSoleProductVariantsAsync(productGids);
+
+                    foreach (var part in batch)
+                    {
+                        string productGid = $"gid://shopify/Product/{part.ShopifyProductId}";
+                        if (soleVariants.TryGetValue(productGid, out string? variantGid)
+                            && variantGid == $"gid://shopify/ProductVariant/{part.ShopifyVariantId}")
+                            report.SoleProductVariantsVerified++;
+                    }
+                }
+
+                if (report.SoleProductVariantsVerified != report.SqlLinkedProducts)
+                    report.Problems.Add("A Shopify product has more than one variant or differs from its SQL variant.");
 
                 if (report.CollectionProducts != expected.Count
                     || !collectionIds.SetEquals(expected)
