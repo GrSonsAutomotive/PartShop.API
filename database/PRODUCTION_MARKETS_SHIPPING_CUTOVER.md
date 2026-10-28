@@ -28,7 +28,7 @@
 7. Schedule Shopify `Upgrade` with the client during a controlled window (not before the API release is safe). Shopify is responsible for migrating existing delivery-profile groups/rates into Market-driven Shipping; **audit rather than assume success**.
 8. Inspect Shopify-created `[SHIPPING]` collections and market rates; do not create duplicates. Map each of the 11 local policies to the correct migrated collection, leaving policy 20 contact-only.
 9. Add verified tag-source conditions. Do not remove migrated manual selections until an independent audit confirms no product is lost. Current membership removal endpoints have strict limits; large groups need a reviewed paginated migration mechanism.
-10. Use a **new tags-only, resumable** bulk-sync routine (to be implemented) for linked products. Do NOT run the existing `POST /api/home/shopify/tags/backfill`: it also rewrites Shopify titles and descriptions.
+10. Use the **new staged, tags-only, PartId-cursor** batch routine after its build and DEV validation. It adds missing ShippingClass tags without replacing other Shopify tags or product content. Do NOT run the existing `POST /api/home/shopify/tags/backfill`: it also rewrites Shopify titles and descriptions.
 11. Independently reconcile each product and each shipping group; validate all active, draft and contact-only cases, duplicates, availability, images, inventory, and sample checkout rates for both single-item and mixed-profile carts.
 12. Complete deterministic restart/failure recovery tests, then enable features gradually using one carefully selected product. Only after approval set the verified production shop domain and its independent production authorization flag.
 13. Monitor job completion, unavailable listings and checkout charges; keep explicit rollback/incident recovery steps.
@@ -36,8 +36,8 @@
 ## Pending blockers
 
 - Production Shopify store identity and Shopify upgrade contents not yet verified.
-- Bulk tags-only routine and >10-item collection membership handoff not production-ready.
+- Tags-only backfill staged with separate disabled-by-default authorization; requires build, DEV verification, and limited production canary. Migrated manual-selection handling for large collections remains unverified.
 - Production-suitable worker restart/failure testing still pending.
 - Existing DEV-only recovery path needs removal/review before code merge.
 
-**Do not flip the Shopify Upgrade control, run the SQL scripts or merge to production until the above preflight succeeds.**
+**Schema migrations 01/02 were run and verified in production after the safety copy. Do not flip the Shopify Upgrade control, enable write flags, or merge to production until the remaining preflight succeeds.**
