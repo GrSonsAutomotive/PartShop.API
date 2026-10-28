@@ -35,6 +35,19 @@ namespace Site_2024.Web.Api.Models
             "gr-sons-shipping-dev.myshopify.com";
         public bool AllowProductionAsyncShipping { get; set; } = false;
 
+        // An entirely separate, OFF-by-default permission for the catalog tag migration.
+        public bool AllowMarketDrivenShippingTagBackfillWrites { get; set; } = false;
+        public bool AllowProductionShippingTagBackfill { get; set; } = false;
+        public string ShippingTagBackfillAuthorizedShopDomain { get; set; } =
+            "gr-sons-shipping-dev.myshopify.com";
+
+        public bool IsShippingTagBackfillStoreAuthorized() =>
+            !string.IsNullOrWhiteSpace(ShopDomain) &&
+            string.Equals(ShopDomain.Trim(), ShippingTagBackfillAuthorizedShopDomain.Trim(),
+                StringComparison.OrdinalIgnoreCase) &&
+            (string.Equals(ShopDomain.Trim(), "gr-sons-shipping-dev.myshopify.com",
+                StringComparison.OrdinalIgnoreCase) || AllowProductionShippingTagBackfill);
+
         public bool IsAsyncShippingStoreAuthorized()
         {
             const string devStore = "gr-sons-shipping-dev.myshopify.com";

@@ -1081,6 +1081,54 @@ query SiteShippingCollectionProductMembership($id: ID!, $after: String) {
             throw new ApplicationException("Shopify collection too large to certify membership safely.");
         }
 
+        // Migration-only: changes Shopify tags, NOT title, description, quantity or publication.
+        public async Task<bool> SyncOnlyShippingClassTagForPartAsync(Part part)
+        {
+            if (part?.ShopifyProductId.HasValue != true || part.ShippingPolicy == null)
+                throw new InvalidOperationException("Part must have a valid Shopify product and SQL shipping policy.");
+
+            string gid = $"gid://shopify/Product/{part.ShopifyProductId.Value}";
+            string[] before = await GetProductTagsAsync(gid);
+            string? desired = part.ShippingPolicy.AllowsOnlineCheckout
+                ? $"ShippingClass_{part.ShippingPolicy.Id}" : null;
+
+            string[] existingShipping = before
+                .Where(x => x.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (existingShipping.Any(x => !string.Equals(x, desired, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException(
+                    "Conflicting Shopify shipping-class tag; requires human review.");
+
+            string[] after = before
+                .Where(x => !x.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                .Concat(desired == null ? Array.Empty<string>() : new[] { desired })
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+            if (new HashSet<string>(before, StringComparer.OrdinalIgnoreCase).SetEquals(after)
+                && before.Length == after.Length)
+                return false;
+
+            const string mutation = @"
+mutation BackfillOnlyShippingClassTag($product: ProductUpdateInput!) {
+  productUpdate(product: $product) {
+    product { id tags }
+    userErrors { field message }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(mutation,
+                new { product = new { id = gid, tags = after } });
+            var root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Tag-only update failed: {errors}");
+            var payload = root.GetProperty("data").GetProperty("productUpdate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shipping-class backfill failed");
+            string[] verified = await GetProductTagsAsync(gid);
+            if (verified.Length != after.Length ||
+                !new HashSet<string>(verified, StringComparer.OrdinalIgnoreCase).SetEquals(after))
+                throw new InvalidOperationException("Tag-only update did not verify.");
+            return true;
+        }
+
         public async Task SyncProductTagsForPartAsync(Part part)
         {
             if (!part.ShopifyProductId.HasValue)
