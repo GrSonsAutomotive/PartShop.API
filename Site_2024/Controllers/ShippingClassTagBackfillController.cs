@@ -29,8 +29,19 @@ namespace Site_2024.Web.Api.Controllers
             _policies = policies; _jobs = jobs; _settings = settings.Value;
         }
 
+        public sealed class ExpectedPart
+        {
+            public int PartId { get; set; }
+            public long ShopifyProductId { get; set; }
+        }
+
         public sealed class BatchRequest
         {
+            public int ExpectedPolicyId { get; set; }
+            public string ExpectedCollectionGid { get; set; } = "";
+            public string ExpectedTagSourceGid { get; set; } = "";
+            public int ExpectedCollectionProductCount { get; set; } = -1;
+            public List<ExpectedPart> ExpectedParts { get; set; } = new();
             public int AfterPartId { get; set; }
             public int Limit { get; set; } = 10;
             public int ExpectedFirstPartId { get; set; }
@@ -80,11 +91,18 @@ ORDER BY Id;", db);
         public async Task<IActionResult> ApplyBatch([FromBody] BatchRequest request)
         {
             if (request == null || !Valid(request.AfterPartId, request.Limit) ||
-                request.Confirmation != "BACKFILL_SHIPPING_CLASS_TAGS")
-                return BadRequest("Explicit preview and confirmation required.");
+                request.Confirmation != "BACKFILL_SHIPPING_CLASS_TAGS" ||
+                request.ExpectedPolicyId <= 0 ||
+                string.IsNullOrWhiteSpace(request.ExpectedCollectionGid) ||
+                string.IsNullOrWhiteSpace(request.ExpectedTagSourceGid) ||
+                request.ExpectedCollectionProductCount < 1 ||
+                request.ExpectedParts == null ||
+                request.ExpectedParts.Count != request.Limit ||
+                request.ExpectedParts.Any(x => x.PartId <= 0 || x.ShopifyProductId <= 0) ||
+                request.ExpectedParts.Select(x => x.PartId).Distinct().Count() != request.ExpectedParts.Count)
+                return BadRequest("Exact expected part IDs, product IDs, policy, Shopify source, collection count, preview and confirmation are required.");
             if (!_settings.AllowMarketDrivenShippingTagBackfillWrites ||
                 !_settings.IsShippingTagBackfillStoreAuthorized() ||
-                !_settings.AllowMarketDrivenShippingPublishing ||
                 !string.Equals(_settings.ShopDomain, request.ExpectedShopDomain,
                     StringComparison.OrdinalIgnoreCase))
                 return Conflict("Shipping-class migration writes are not authorized.");
@@ -98,9 +116,45 @@ ORDER BY Id;", db);
                 return Conflict("Shipping policy collection mappings are incomplete or duplicated.");
 
             var rows = await ReadBatch(request.AfterPartId, request.Limit, HttpContext.RequestAborted);
-            if (rows.Count == 0 || rows[0].Id != request.ExpectedFirstPartId ||
-                rows[^1].Id != request.ExpectedLastPartId)
+            if (rows.Count == 0 || rows.Count != request.ExpectedParts.Count ||
+                rows[0].Id != request.ExpectedFirstPartId ||
+                rows[^1].Id != request.ExpectedLastPartId )
                 return Conflict("The preview batch changed; preview again before applying.");
+
+            // Ensure EVERY cursor-selected row is exactly the expected product and policy.
+            // The PartId cursor is not policy-scoped, so checking only its endpoints
+            // could silently modify an unintended shipping group.
+            for (int i = 0; i < rows.Count; i++)
+            {
+                if (rows[i].Id != request.ExpectedParts[i].PartId ||
+                    rows[i].ProductId != request.ExpectedParts[i].ShopifyProductId ||
+                    rows[i].PolicyId != request.ExpectedPolicyId)
+                    return Conflict("SQL batch differs from the exact preview; no tags changed.");
+            }
+
+            var policy = checkout.SingleOrDefault(x => x.Id == request.ExpectedPolicyId);
+            if (policy == null ||
+                !string.Equals(policy.ShopifyShippingCollectionGid, request.ExpectedCollectionGid,
+                    StringComparison.Ordinal))
+                return Conflict("Policy-to-collection mapping changed; no tags changed.");
+
+            var collection = await _shopify.GetShippingCollectionAsync(request.ExpectedCollectionGid);
+            if (collection == null ||
+                collection.ProductCount != request.ExpectedCollectionProductCount ||
+                collection.Sources.Count(x => x.SourceGid == request.ExpectedTagSourceGid &&
+                    x.SourceType == "CollectionConditionsSource" &&
+                    x.TargetType == "PRODUCTS" &&
+                    !x.HasExplicitSelections &&
+                    !x.HasExclusions &&
+                    x.InclusionConditionCount == 1 &&
+                    x.TagConditions.Count == 1 &&
+                    x.TagConditions[0].Relation == "TAGGED_WITH" &&
+                    x.TagConditions[0].MatchType == "ANY" &&
+                    x.TagConditions[0].Values.Count == 1 &&
+                    string.Equals(x.TagConditions[0].Values[0],
+                        $"ShippingClass_{request.ExpectedPolicyId}",
+                        StringComparison.OrdinalIgnoreCase)) != 1)
+                return Conflict("Automatic tag source or collection count changed; no tags changed.");
 
             int changed=0, unchanged=0;
             var errors = new List<object>();
