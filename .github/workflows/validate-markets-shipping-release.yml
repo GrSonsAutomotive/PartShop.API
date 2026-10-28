@@ -1,0 +1,21 @@
+name: Validate Markets Shipping Production Prep (BUILD ONLY)
+
+on:
+  push:
+    branches:
+      - release/markets-shipping-prod-prep-20261028
+
+permissions:
+  contents: read
+
+jobs:
+  build-no-deploy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+      - name: Compile release candidate (no Azure deployment)
+        run: dotnet build --configuration Release
