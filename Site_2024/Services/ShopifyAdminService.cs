@@ -412,7 +412,7 @@ query SiteSourceSelectionPage($id: ID!, $after: String) {
       id
       inclusion {
         selections(first: 100, after: $after) {
-          nodes { product { id } }
+          nodes { product { id } variantIds }
           pageInfo { hasNextPage endCursor }
         }
       }
@@ -463,6 +463,31 @@ query SiteSourceSelectionPage($id: ID!, $after: String) {
                     || !productId.StartsWith("gid://shopify/Product/", StringComparison.Ordinal))
                     throw new ApplicationException("Shopify paginated shipping audit returned an invalid product.");
                 result.ProductGids.Add(productId);
+                if (kind == "selections")
+                {
+                    JsonElement variantIds = item.GetProperty("variantIds");
+                    List<string>? selectedVariants = null;
+                    if (variantIds.ValueKind == JsonValueKind.Array)
+                    {
+                        selectedVariants = new List<string>();
+                        foreach (JsonElement variant in variantIds.EnumerateArray())
+                        {
+                            string? variantGid = variant.GetString();
+                            if (string.IsNullOrWhiteSpace(variantGid) ||
+                                !variantGid.StartsWith("gid://shopify/ProductVariant/", StringComparison.Ordinal))
+                                throw new ApplicationException("Shopify selection has an invalid variant GID.");
+                            selectedVariants.Add(variantGid);
+                        }
+                    }
+                    else if (variantIds.ValueKind != JsonValueKind.Null)
+                        throw new ApplicationException("Shopify selection has an unexpected variant list.");
+
+                    result.Selections.Add(new ShopifyShippingSelectedVariant
+                    {
+                        ProductGid = productId,
+                        VariantGids = selectedVariants
+                    });
+                }
             }
 
             if (result.HasNextPage && string.IsNullOrWhiteSpace(result.EndCursor))
