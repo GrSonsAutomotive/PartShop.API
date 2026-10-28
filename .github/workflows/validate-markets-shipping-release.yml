@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - release/markets-shipping-prod-prep-20261028
+      - hotfix/shipping-tag-only-batch-safety-20261028
 
 permissions:
   contents: read
