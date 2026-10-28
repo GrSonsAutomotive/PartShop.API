@@ -348,6 +348,129 @@ query SiteShippingMembershipAudit($id: ID!) {
 
 
 
+
+        // Bounded read-only paginator for full production reconciliation.
+        // Each request queries one Shopify connection with its OWN cursor.
+        // A source is first confirmed to belong to the requested collection.
+        public async Task<ShopifyShippingMembershipPage?> GetShippingMembershipPageAsync(
+            string collectionGid, string? sourceGid, string kind, string? after)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+
+            if (kind != "collection" && kind != "source" && kind != "selections")
+                throw new ArgumentException("Expected kind=collection, source, or selections.", nameof(kind));
+            if (!string.IsNullOrEmpty(after) && after.Length > 1024)
+                throw new ArgumentException("Shopify cursor is too long.", nameof(after));
+
+            if (kind != "collection")
+            {
+                const string prefix = "gid://shopify/CollectionConditionsSource/";
+                if (string.IsNullOrWhiteSpace(sourceGid)
+                    || !sourceGid.StartsWith(prefix, StringComparison.Ordinal)
+                    || sourceGid.Length <= prefix.Length
+                    || !sourceGid[prefix.Length..].All(char.IsDigit))
+                    throw new ArgumentException("Invalid Shopify CollectionConditionsSource GID.", nameof(sourceGid));
+
+                ShopifyShippingCollectionInfo? snapshot =
+                    await GetShippingCollectionAsync(collectionGid);
+                if (snapshot == null)
+                    return null;
+                if (!snapshot.Sources.Any(x => x.SourceGid == sourceGid
+                    && x.SourceType == "CollectionConditionsSource"))
+                    throw new ArgumentException("Source is not attached to this collection.", nameof(sourceGid));
+            }
+
+            const string collectionQuery = @"
+query SiteCollectionMembershipPage($id: ID!, $after: String) {
+  collection(id: $id) {
+    id
+    products(first: 100, after: $after) {
+      nodes { id }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}";
+
+            const string sourceProductsQuery = @"
+query SiteSourceMembershipPage($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on CollectionConditionsSource {
+      id
+      products(first: 100, after: $after) {
+        nodes { id }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}";
+
+            const string selectionsQuery = @"
+query SiteSourceSelectionPage($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on CollectionConditionsSource {
+      id
+      inclusion {
+        selections(first: 100, after: $after) {
+          nodes { product { id } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+}";
+
+            bool isCollection = kind == "collection";
+            string selectedQuery = isCollection ? collectionQuery
+                : kind == "source" ? sourceProductsQuery : selectionsQuery;
+            string requestedId = isCollection ? collectionGid : sourceGid!;
+
+            using JsonDocument doc = await SendGraphQlAsync(selectedQuery,
+                new { id = requestedId, after }, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify paginated shipping audit failed: {errors}");
+
+            JsonElement node = root.GetProperty("data")
+                .GetProperty(isCollection ? "collection" : "node");
+            if (node.ValueKind != JsonValueKind.Object)
+                return null;
+            if (!string.Equals(node.GetProperty("id").GetString(), requestedId,
+                StringComparison.Ordinal))
+                throw new ApplicationException("Shopify paginated shipping audit returned a different identity.");
+
+            JsonElement connection = kind == "selections"
+                ? node.GetProperty("inclusion").GetProperty("selections")
+                : node.GetProperty("products");
+            JsonElement pageInfo = connection.GetProperty("pageInfo");
+            var result = new ShopifyShippingMembershipPage
+            {
+                CollectionGid = collectionGid,
+                SourceGid = isCollection ? null : sourceGid,
+                Kind = kind,
+                HasNextPage = pageInfo.GetProperty("hasNextPage").GetBoolean(),
+                EndCursor = pageInfo.TryGetProperty("endCursor", out JsonElement cursor)
+                    && cursor.ValueKind == JsonValueKind.String
+                    ? cursor.GetString() : null
+            };
+
+            foreach (JsonElement item in connection.GetProperty("nodes").EnumerateArray())
+            {
+                string? productId = kind == "selections"
+                    ? item.GetProperty("product").GetProperty("id").GetString()
+                    : item.GetProperty("id").GetString();
+                if (string.IsNullOrWhiteSpace(productId)
+                    || !productId.StartsWith("gid://shopify/Product/", StringComparison.Ordinal))
+                    throw new ApplicationException("Shopify paginated shipping audit returned an invalid product.");
+                result.ProductGids.Add(productId);
+            }
+
+            if (result.HasNextPage && string.IsNullOrWhiteSpace(result.EndCursor))
+                throw new ApplicationException("Shopify returned incomplete pagination data.");
+            return result;
+        }
+
+
         // Shopify does not allow a conditions source with zero selections
         // and zero conditions. If its last manual product is being reassigned,
         // unlink that one source from the collection instead. The collection
