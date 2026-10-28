@@ -8,6 +8,7 @@ on:
       - feat/shipping-full-membership-audit-20261028
       - feat/legacy-variant-source-readiness-20261028
       - feat/verify-shopify-variant-membership-20261028
+      - fix/safe-market-new-part-add-publish-20261028
 
 permissions:
   contents: read
