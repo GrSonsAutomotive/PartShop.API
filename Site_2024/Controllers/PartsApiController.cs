@@ -19,6 +19,8 @@ namespace Site_2024.Web.Api.Controllers
         private readonly IPartService _service;
         private readonly IPartImageService _partImageService;
         private readonly ILocationService _locationService;
+        private readonly IAvailableService _availableService;
+        private readonly IShippingPoliciesService _shippingPoliciesService;
         private readonly IShopifyPartSyncService _shopifyPartSyncService;
         private readonly IShopifyAdminService _shopifyAdminService;
         private readonly IAuthenticationService<IUserAuthData> _authService;
@@ -31,6 +33,8 @@ namespace Site_2024.Web.Api.Controllers
             IPartService service,
             IPartImageService partImageService,
             ILocationService locationService,
+            IAvailableService availableService,
+            IShippingPoliciesService shippingPoliciesService,
             IShopifyPartSyncService shopifyPartSyncService,
             IShopifyAdminService shopifyAdminService,
             ILogger<PartsApiController> logger,
@@ -44,6 +48,8 @@ namespace Site_2024.Web.Api.Controllers
             _service = service;
             _partImageService = partImageService;
             _locationService = locationService;
+            _availableService = availableService;
+            _shippingPoliciesService = shippingPoliciesService;
             _shopifyPartSyncService = shopifyPartSyncService;
             _shopifyAdminService = shopifyAdminService;
             _authService = authService;
@@ -68,6 +74,75 @@ namespace Site_2024.Web.Api.Controllers
                     code = 401;
                     response = new ErrorResponse("You must be logged in.");
                     return StatusCode(code, response);
+                }
+
+                // Before saving the SQL row or uploading photos, establish that
+                // an active shipping tier is mapped to the right Shopify tag source.
+                // An unapplied production publishing gate MUST NOT create a
+                // misleading, customer-visible listing without a checkout.
+                ShippingPolicy? selectedPolicy = (_shippingPoliciesService.GetAll() ?? new())
+                    .FirstOrDefault(p => p.Id == model.ShippingPolicyId && p.IsActive);
+                if (selectedPolicy == null)
+                    return BadRequest(new ErrorResponse("Select a valid active shipping policy."));
+
+                var statuses = _availableService.GetAll() ?? new();
+                Available? available = statuses.FirstOrDefault(a =>
+                    string.Equals(a.Status?.Trim(), "Available", StringComparison.OrdinalIgnoreCase));
+                Available? pending = statuses.FirstOrDefault(a =>
+                    string.Equals(a.Status?.Trim(), "Pending", StringComparison.OrdinalIgnoreCase));
+
+                if (available == null || (selectedPolicy.AllowsOnlineCheckout && pending == null))
+                    return StatusCode(503, new ErrorResponse(
+                        "Inventory availability configuration is incomplete. No part was added."));
+
+                if (selectedPolicy.AllowsOnlineCheckout)
+                {
+                    try
+                    {
+                        bool usesMarkets = await _shopifyAdminService.UsesMarketDrivenShippingAsync();
+                        if (usesMarkets)
+                        {
+                            if (!_shippingSettings.Value.AllowMarketDrivenShippingPublishing)
+                                return Conflict(new ErrorResponse(
+                                    "New Shopify checkout listings are not enabled yet. " +
+                                    "No part was created. Verify Shopify Markets checkout rates first."));
+                            if (!_shippingSettings.Value.CreateProductsAsDraft)
+                                return Conflict(new ErrorResponse(
+                                    "New Shopify products must be created as Draft until shipping is verified."));
+
+                            if (string.IsNullOrWhiteSpace(selectedPolicy.ShopifyShippingCollectionGid))
+                                return Conflict(new ErrorResponse(
+                                    "Selected shipping policy has no Shopify collection mapping."));
+
+                            ShopifyShippingCollectionInfo? collection =
+                                await _shopifyAdminService.GetShippingCollectionAsync(
+                                    selectedPolicy.ShopifyShippingCollectionGid);
+                            bool hasCorrectTagSource = collection?.Sources.Any(src =>
+                                src.SourceType == "CollectionConditionsSource"
+                                && src.TargetType == "PRODUCTS"
+                                && !src.HasExplicitSelections && !src.HasExclusions
+                                && src.InclusionConditionCount == 1
+                                && src.TagConditions.Count == 1
+                                && src.TagConditions[0].Relation == "TAGGED_WITH"
+                                && src.TagConditions[0].MatchType == "ANY"
+                                && src.TagConditions[0].Values.Count == 1
+                                && string.Equals(src.TagConditions[0].Values[0],
+                                    $"ShippingClass_{selectedPolicy.Id}",
+                                    StringComparison.OrdinalIgnoreCase)) == true;
+
+                            if (collection?.CollectionGid != selectedPolicy.ShopifyShippingCollectionGid
+                                || !hasCorrectTagSource)
+                                return Conflict(new ErrorResponse(
+                                    "Shopify shipping collection or automatic tag rule differs from SQL. " +
+                                    "No part was created."));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError(ex, "Unable to verify checkout shipping before new part creation.");
+                        return StatusCode(503, new ErrorResponse(
+                            "Unable to verify Shopify shipping readiness. No part was created."));
+                    }
                 }
 
                 // Validate LocationId exists
@@ -128,7 +203,11 @@ namespace Site_2024.Web.Api.Controllers
                 }
 
                 model.Image = imageUrl;
-                model.AvailableId = 1; // server rule: new parts default to Available
+                // Checkout parts remain hidden from customer search until
+                // Shopify publication AND shipping-membership verification succeed.
+                // Contact-only parts may be listed for inquiries as before.
+                model.AvailableId = selectedPolicy.AllowsOnlineCheckout
+                    ? pending!.Id : available.Id;
 
                 int userId = user.Id;
 
@@ -142,6 +221,7 @@ namespace Site_2024.Web.Api.Controllers
                     ShopifyPartSyncResult shopifyResult =
                         await _shopifyPartSyncService.CreateAndSyncProductForPartAsync(id);
 
+                    Response.Headers["X-Shopify-Sync-Status"] = "created-draft";
                     base.Logger.LogInformation(
                         "Shopify product created for PartId {PartId}. ShopifyProductId: {ShopifyProductId}, ShopifyVariantId: {ShopifyVariantId}, ShopifyInventoryItemId: {ShopifyInventoryItemId}",
                         id,
@@ -151,9 +231,10 @@ namespace Site_2024.Web.Api.Controllers
                 }
                 catch (Exception shopifyEx)
                 {
+                    Response.Headers["X-Shopify-Sync-Status"] = "failed-pending";
                     base.Logger.LogError(
                         shopifyEx,
-                        "Shopify sync failed for newly created PartId {PartId}. Local part was still created.",
+                        "Shopify sync failed for newly created PartId {PartId}. Local part remains pending and hidden.",
                         id);
 
                     // Later we can save this to a ShopifySyncStatus / ShopifySyncError field.
@@ -225,6 +306,34 @@ namespace Site_2024.Web.Api.Controllers
                 // Ensure the selected Site_2024 shipping tier is assigned before publishing.
                 await _shopifyPartSyncService.SyncShippingProfileForPartAsync(id);
 
+                // When Shopify uses Market-driven Shipping, merely attaching
+                // ShippingClass_<policy> is not proof that the product has
+                // joined the shipping collection yet. Fail closed until both
+                // the exact tag and Shopify membership are observable.
+                if (await _shopifyAdminService.UsesMarketDrivenShippingAsync())
+                {
+                    ShippingPolicy? mappedPolicy = (_shippingPoliciesService.GetAll() ?? new())
+                        .FirstOrDefault(p => p.Id == part.ShippingPolicy.Id && p.IsActive);
+                    if (mappedPolicy == null ||
+                        string.IsNullOrWhiteSpace(mappedPolicy.ShopifyShippingCollectionGid))
+                        return Conflict(new ErrorResponse("Active Shopify shipping collection mapping is missing."));
+
+                    ShopifyProductShippingSnapshot snapshot =
+                        await _shopifyAdminService.GetProductShippingSnapshotAsync(part.ShopifyProductId.Value);
+                    if (snapshot.ProductGid != $"gid://shopify/Product/{part.ShopifyProductId.Value}" ||
+                        snapshot.ShippingClassTags.Count != 1 ||
+                        !string.Equals(snapshot.ShippingClassTags[0],
+                            $"ShippingClass_{mappedPolicy.Id}", StringComparison.OrdinalIgnoreCase))
+                        return Conflict(new ErrorResponse(
+                            "Shopify product's shipping-class tag does not match SQL. Product not published."));
+
+                    if (!await _shopifyAdminService.CollectionContainsProductAsync(
+                        mappedPolicy.ShopifyShippingCollectionGid, snapshot.ProductGid))
+                        return Conflict(new ErrorResponse(
+                            "Shopify shipping collection has not recognized this product yet. " +
+                            "Product not published; retry once collection membership has settled."));
+                }
+
                 // Publish uses the latest local quantity, price, SKU, and photos.
                 ShopifyProductInventorySyncResult inventoryResult =
                     await _shopifyAdminService.SyncProductDetailsForPartAsync(part);
@@ -241,6 +350,25 @@ namespace Site_2024.Web.Api.Controllers
                 publishResult.ImagesRequested = mediaResult.ImagesRequested;
                 publishResult.ImagesAdded = mediaResult.ImagesAdded;
                 publishResult.ImagesSkipped = mediaResult.ImagesSkipped;
+
+                // Only a fully published part can be promoted from Pending
+                // into customer-visible Available inventory. Do not change
+                // existing Available/Unavailable/Sold status by republishing.
+                if (publishResult.PublishedToOnlineStore &&
+                    string.Equals(part.Available?.Status?.Trim(),
+                        "Pending", StringComparison.OrdinalIgnoreCase))
+                {
+                    Available? available = (_availableService.GetAll() ?? new())
+                        .FirstOrDefault(a => string.Equals(a.Status?.Trim(),
+                            "Available", StringComparison.OrdinalIgnoreCase));
+                    if (available == null)
+                        throw new InvalidOperationException(
+                            "Shopify published successfully, but SQL has no Available inventory status.");
+                    _service.PatchPart(id, new PartPatchRequest
+                    {
+                        AvailableId = available.Id
+                    }, user.Id);
+                }
 
                 response = new ItemResponse<ShopifyProductPublishResult>
                 {
