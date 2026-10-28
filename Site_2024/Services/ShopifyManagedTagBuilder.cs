@@ -13,7 +13,8 @@ namespace Site_2024.Web.Api.Services
             "Category_",
             "Condition_",
             "Make_",
-            "Model_"
+            "Model_",
+            "ShippingClass_"
         };
 
         public static string BuildManagedTag(string ruleType, string rawValue)
@@ -66,6 +67,13 @@ namespace Site_2024.Web.Api.Services
             foreach (PartCategory category in part.Categories ?? new List<PartCategory>())
             {
                 AddManagedTag(tags, "Category", category.CatagoryName);
+            }
+
+            // Stable policy ID makes shipping classification independent of policy names.
+            // Contact-only listings have no checkout shipping class.
+            if (part.ShippingPolicy?.Id > 0 && part.ShippingPolicy.AllowsOnlineCheckout)
+            {
+                tags.Add($"ShippingClass_{part.ShippingPolicy.Id}");
             }
 
             AddManagedTag(tags, "Condition", part.Condition?.Name);

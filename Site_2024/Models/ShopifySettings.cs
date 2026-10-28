@@ -6,6 +6,62 @@ namespace Site_2024.Web.Api.Models
         public string ClientId { get; set; } = string.Empty;
         public string ClientSecret { get; set; } = string.Empty;
         public string ApiVersion { get; set; } = "2026-04";
+
+        // OFF by default. This does not create Markets rates or migrate Shopify
+        // settings. Enable only after a separate Markets test-store validation.
+        public bool AllowMarketDrivenShippingPublishing { get; set; } = false;
+        // Independently gated: editing Shopify collection membership sources can
+        // affect existing products' checkout rates. Opt in per environment.
+        public bool AllowMarketDrivenShippingCollectionSourceWrites { get; set; } = false;
+        // Separate, off-by-default gate for removing individual manual selections.
+        // Does not authorize automatic shipping-policy reassignment.
+        public bool AllowMarketDrivenShippingCollectionMembershipWrites { get; set; } = false;
+        // Entirely separate and off by default. Authorizes a controlled
+        // unpublish -> tag sync -> collection verify -> SQL patch -> republish.
+        // Never enable for production before recovery/volume testing.
+        public bool AllowMarketDrivenShippingReassignmentWrites { get; set; } = false;
+        // Separate DEV-only gate for safely resuming an interrupted migration.
+        public bool AllowMarketDrivenShippingRecoveryWrites { get; set; } = false;
+        // Async pilot: schema switch is enabled only AFTER the separate DEV SQL migration.
+        public bool AsyncShippingJobsSchemaReady { get; set; } = false;
+        // Separate write permission. Never enable for production without review.
+        public bool AllowMarketDrivenShippingAsyncReassignmentWrites { get; set; } = false;
+        // Background processing runs independently of browser/session and queue gate.
+        public bool EnableMarketDrivenShippingAsyncWorker { get; set; } = false;
+        // Shipping jobs are locked to the DEV store unless an explicit production
+        // store match AND a separate production release flag have been configured.
+        // These are independent of the queue/worker/publishing feature flags.
+        public string AsyncShippingAuthorizedShopDomain { get; set; } =
+            "gr-sons-shipping-dev.myshopify.com";
+        public bool AllowProductionAsyncShipping { get; set; } = false;
+
+        // An entirely separate, OFF-by-default permission for the catalog tag migration.
+        public bool AllowMarketDrivenShippingTagBackfillWrites { get; set; } = false;
+        public bool AllowProductionShippingTagBackfill { get; set; } = false;
+        public string ShippingTagBackfillAuthorizedShopDomain { get; set; } =
+            "gr-sons-shipping-dev.myshopify.com";
+
+        public bool IsShippingTagBackfillStoreAuthorized() =>
+            !string.IsNullOrWhiteSpace(ShopDomain) &&
+            string.Equals(ShopDomain.Trim(), ShippingTagBackfillAuthorizedShopDomain.Trim(),
+                StringComparison.OrdinalIgnoreCase) &&
+            (string.Equals(ShopDomain.Trim(), "gr-sons-shipping-dev.myshopify.com",
+                StringComparison.OrdinalIgnoreCase) || AllowProductionShippingTagBackfill);
+
+        public bool IsAsyncShippingStoreAuthorized()
+        {
+            const string devStore = "gr-sons-shipping-dev.myshopify.com";
+            if (string.IsNullOrWhiteSpace(ShopDomain) ||
+                string.IsNullOrWhiteSpace(AsyncShippingAuthorizedShopDomain) ||
+                !string.Equals(ShopDomain.Trim(),
+                    AsyncShippingAuthorizedShopDomain.Trim(),
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return string.Equals(ShopDomain.Trim(), devStore,
+                       StringComparison.OrdinalIgnoreCase)
+                || AllowProductionAsyncShipping;
+        }
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";

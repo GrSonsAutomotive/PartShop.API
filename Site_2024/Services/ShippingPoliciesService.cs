@@ -60,12 +60,32 @@ namespace Site_2024.Web.Api.Services
                     policy.AllowsOnlineCheckout = reader.GetSafeBool(i++);
                     policy.DateCreated = reader.GetSafeDateTime(i++);
                     policy.DateModified = reader.GetSafeDateTime(i++);
+                    // The collection column is appended by the Markets migration.
+                    // Keep supporting databases where that migration is pending.
+                    if (reader.FieldCount > i)
+                    {
+                        policy.ShopifyShippingCollectionGid = reader.GetSafeString(i++);
+                    }
 
                     list ??= new List<ShippingPolicy>();
                     list.Add(policy);
                 });
 
             return list;
+        }
+
+        public void UpdateShopifyShippingCollectionGid(int id, string collectionGid)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid))
+                throw new ArgumentException("A Shopify collection GID is required.", nameof(collectionGid));
+
+            _data.ExecuteNonQuery(
+                "[dbo].[ShippingPolicies_UpdateShopifyShippingCollectionGid]",
+                inputParamMapper: col =>
+                {
+                    col.AddWithValue("@Id", id);
+                    col.AddWithValue("@ShopifyShippingCollectionGid", collectionGid);
+                });
         }
 
         public void UpdateShopifyProfileId(int id, long shopifyProfileId)

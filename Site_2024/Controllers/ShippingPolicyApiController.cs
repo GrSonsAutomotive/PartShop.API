@@ -9,6 +9,7 @@ using Site_2024.Web.Api.Responses;
 using Site_2024.Web.Api.Services;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Site_2024.Web.Api.Controllers
 {
@@ -55,6 +56,632 @@ namespace Site_2024.Web.Api.Controllers
             }
 
             return StatusCode(code, response);
+        }
+
+        // Uses only local SQL. Safe to call before connecting a Shopify test store.
+        [HttpGet("shopify/markets-plan")]
+        [Authorize(Policy = "AdminAction")]
+        public ActionResult<ItemResponse<object>> GetMarketsShippingPlan()
+        {
+            List<ShippingPolicy> policies = _service.GetAll() ?? new List<ShippingPolicy>();
+
+            var checkoutPolicies = policies.Where(policy => policy.AllowsOnlineCheckout).ToArray();
+            var response = new
+            {
+                TotalActivePolicies = policies.Count,
+                CheckoutEnabledPolicies = checkoutPolicies.Length,
+                MissingCollectionMappings = checkoutPolicies.Count(
+                    policy => string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid)),
+                Policies = policies.Select(policy => new
+                {
+                    policy.Id,
+                    policy.Name,
+                    policy.AllowsOnlineCheckout,
+                    policy.ShopifyProfileId,
+                    policy.ShopifyShippingCollectionGid,
+                    ShippingClassTag = policy.AllowsOnlineCheckout
+                        ? $"ShippingClass_{policy.Id}"
+                        : null
+                }).ToArray()
+            };
+
+            return Ok(new ItemResponse<object> { Item = response });
+        }
+
+        [HttpGet("shopify/mode")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<bool>>> GetShopifyShippingMode(
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            try
+            {
+                bool enabled = await shopifyAdminService.UsesMarketDrivenShippingAsync();
+                return Ok(new ItemResponse<bool> { Item = enabled });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to detect Shopify market-driven shipping mode.");
+                return StatusCode(502, new ErrorResponse("Unable to determine Shopify shipping mode."));
+            }
+        }
+
+        [HttpPost("{id:int}/shopify-collection")]
+        [Authorize(Policy = "PartsDelete")]
+        public async Task<ActionResult<ItemResponse<ShopifyCollectionCreateResult>>> CreateShippingCollection(
+            int id,
+            [FromServices] IShopifyAdminService shopifyAdminService,
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
+        {
+            // Creating checkout shipping collections is a Shopify write.
+            // Never allow it during the production pre-upgrade deployment.
+            if (!shopifyOptions.Value.AllowMarketDrivenShippingCollectionSourceWrites ||
+                !shopifyOptions.Value.IsAsyncShippingStoreAuthorized())
+                return Conflict(new ErrorResponse(
+                    "Shopify shipping collection creation is disabled for this environment."));
+
+            ShippingPolicy? policy = _service.GetAll().FirstOrDefault(item => item.Id == id);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Active shipping policy was not found."));
+
+            if (!policy.AllowsOnlineCheckout)
+                return BadRequest(new ErrorResponse("Contact-only policies must not have a checkout collection."));
+
+            if (!string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                return Conflict(new ErrorResponse("Shipping policy already has a mapped Shopify collection."));
+
+            try
+            {
+                if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse("Configure shipping collections on a market-driven Shopify test store."));
+
+                ShopifyCollectionCreateResult result =
+                    await shopifyAdminService.CreateAutomatedShippingCollectionAsync(policy);
+
+                // Persist only after Shopify confirms creation. Failed saves require
+                // reconciling the created collection before retrying, not blind recreation.
+                _service.UpdateShopifyShippingCollectionGid(id, result.CollectionGid);
+
+                return Ok(new ItemResponse<ShopifyCollectionCreateResult> { Item = result });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to provision Shopify shipping collection for policy {PolicyId}.", id);
+                return StatusCode(502, new ErrorResponse(
+                    "Shipping collection setup failed. Check logs and existing Shopify collections before retrying."));
+            }
+        }
+
+
+        // Read-only Shopify inspection; lists collections in pages of up to 50.
+        [HttpGet("shopify/collections")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingCollectionPage>>> ListShopifyCollections(
+            [FromQuery] string? after,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            try
+            {
+                ShopifyShippingCollectionPage page =
+                    await shopifyAdminService.GetShippingCollectionsAsync(after);
+                return Ok(new ItemResponse<ShopifyShippingCollectionPage> { Item = page });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to list Shopify collections.");
+                return StatusCode(502, new ErrorResponse("Unable to inspect Shopify collections."));
+            }
+        }
+
+        // Read-only inspection of one Shopify collection and its source conditions.
+        [HttpGet("shopify/collection")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingCollectionInfo>>> InspectShopifyCollection(
+            [FromQuery] string collectionGid,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid))
+                return BadRequest(new ErrorResponse("A Shopify collection GID is required."));
+
+            try
+            {
+                ShopifyShippingCollectionInfo? collection =
+                    await shopifyAdminService.GetShippingCollectionAsync(collectionGid);
+                if (collection == null)
+                    return NotFound(new ErrorResponse("Collection not found in the connected Shopify store."));
+
+                return Ok(new ItemResponse<ShopifyShippingCollectionInfo> { Item = collection });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to inspect Shopify collection.");
+                return StatusCode(502, new ErrorResponse("Unable to inspect Shopify collection."));
+            }
+        }
+
+
+        // Confirm existing products are visible before testing append-only rules.
+        [HttpGet("shopify/collection-membership-audit")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingMembershipAudit>>> AuditCollectionMembership(
+            [FromQuery] string collectionGid,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid))
+                return BadRequest(new ErrorResponse("A Shopify Collection GID is required."));
+            try
+            {
+                ShopifyShippingMembershipAudit? audit =
+                    await shopifyAdminService.AuditShippingCollectionMembershipAsync(collectionGid);
+                if (audit == null)
+                    return NotFound(new ErrorResponse("Shopify collection not found."));
+                return Ok(new ItemResponse<ShopifyShippingMembershipAudit> { Item = audit });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed read-only membership audit for Shopify collection.");
+                return StatusCode(502, new ErrorResponse("Unable to audit Shopify collection membership."));
+            }
+        }
+
+        // Adopt a Shopify-created collection; never create or modify a collection here.
+        // Collection source updates are a separate, explicitly verified operation.
+        [HttpPost("{id:int}/shopify-collection/adopt")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingCollectionInfo>>> AdoptShippingCollection(
+            int id,
+            [FromBody] ShopifyShippingCollectionAdoptionRequest request,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.CollectionGid)
+                || string.IsNullOrWhiteSpace(request.ExpectedTitle))
+                return BadRequest(new ErrorResponse("CollectionGid and ExpectedTitle are required."));
+
+            List<ShippingPolicy> policies = _service.GetAll() ?? new();
+            ShippingPolicy? policy = policies.FirstOrDefault(item => item.Id == id);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Active shipping policy not found."));
+            if (!policy.AllowsOnlineCheckout)
+                return BadRequest(new ErrorResponse("Contact-only shipping policies cannot be mapped."));
+
+            // Never overwrite an existing mapping or reuse a collection assigned to
+            // another policy. A repeated request for an existing mapping is safe.
+            string gid = request.CollectionGid.Trim();
+            if (!string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid)
+                && !string.Equals(policy.ShopifyShippingCollectionGid, gid, StringComparison.Ordinal))
+                return Conflict(new ErrorResponse("Policy already has a different mapped collection."));
+
+            if (policies.Any(other => other.Id != id
+                && string.Equals(other.ShopifyShippingCollectionGid, gid, StringComparison.Ordinal)))
+                return Conflict(new ErrorResponse("Collection is already mapped to another shipping policy."));
+
+            try
+            {
+                if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse("Collection adoption requires Market-driven Shipping."));
+
+                ShopifyShippingCollectionInfo? collection =
+                    await shopifyAdminService.GetShippingCollectionAsync(gid);
+                if (collection == null)
+                    return NotFound(new ErrorResponse("Collection not found in the connected Shopify store."));
+
+                if (!string.Equals(collection.Title, request.ExpectedTitle.Trim(), StringComparison.Ordinal))
+                    return Conflict(new ErrorResponse("Shopify collection title differs from ExpectedTitle. Reinspect before adopting."));
+
+                if (!collection.Title.EndsWith(policy.Name, StringComparison.OrdinalIgnoreCase))
+                    return Conflict(new ErrorResponse("Collection title does not match the local shipping policy name."));
+
+                string expectedTag = $"ShippingClass_{id}";
+                if (collection.ShippingClassTags.Any(tag =>
+                        !string.Equals(tag, expectedTag, StringComparison.OrdinalIgnoreCase)))
+                    return Conflict(new ErrorResponse("Collection has another shipping-class tag condition; review membership before adopting."));
+
+                if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                    _service.UpdateShopifyShippingCollectionGid(id, gid);
+
+                // Mapping a collection is not proof that its new-product tag
+                // membership source is configured. Verify that separately.
+                return Ok(new ItemResponse<ShopifyShippingCollectionInfo> { Item = collection });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to adopt Shopify collection for policy {PolicyId}.", id);
+                return StatusCode(502, new ErrorResponse("Unable to adopt Shopify collection; verify the store and SQL state."));
+            }
+        }
+
+
+
+        // Guarded manual-selection removal: safe for a DEV migration test, NOT
+        // an automatic part reassignment workflow. Independent setting is OFF by default.
+        [HttpPost("{id:int}/shopify-collection/remove-manual-selection")]
+        [Authorize(Policy = "PartsDelete")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingManualSelectionRemoveResult>>> RemoveManualSelection(
+            int id,
+            [FromBody] ShopifyShippingManualSelectionRemoveRequest request,
+            [FromServices] IShopifyAdminService shopifyAdminService,
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
+        {
+            if (request == null
+                || request.Confirmation != "REMOVE_MANUAL_SHIPPING_SELECTION"
+                || request.ExpectedProductCount < 0
+                || string.IsNullOrWhiteSpace(request.ExpectedTitle)
+                || string.IsNullOrWhiteSpace(request.SourceGid)
+                || string.IsNullOrWhiteSpace(request.ProductGid))
+                return BadRequest(new ErrorResponse(
+                    "ProductGid, SourceGid, ExpectedTitle, ExpectedProductCount, and confirmation REMOVE_MANUAL_SHIPPING_SELECTION are required."));
+
+            if (!shopifyOptions.Value.AllowMarketDrivenShippingCollectionMembershipWrites)
+                return Conflict(new ErrorResponse(
+                    "Shopify manual shipping collection membership writes are disabled for this environment."));
+
+            ShippingPolicy? policy = (_service.GetAll() ?? new())
+                .FirstOrDefault(item => item.Id == id && item.AllowsOnlineCheckout);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Checkout shipping policy not found."));
+            if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                return Conflict(new ErrorResponse("Policy does not have a Shopify collection mapping."));
+
+            // Stage markers make failed attempts diagnosable without revealing
+            // OAuth tokens, request payloads, or Shopify raw response bodies.
+            string failureStage = "preflight";
+            try
+            {
+                if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse("Store does not use Market-driven Shipping."));
+
+                string collectionGid = policy.ShopifyShippingCollectionGid;
+                ShopifyShippingCollectionInfo? before =
+                    await shopifyAdminService.GetShippingCollectionAsync(collectionGid);
+                if (before == null)
+                    return NotFound(new ErrorResponse("Mapped Shopify collection not found."));
+
+                if (!string.Equals(before.Title, request.ExpectedTitle.Trim(), StringComparison.Ordinal)
+                    || before.ProductCount != request.ExpectedProductCount)
+                    return Conflict(new ErrorResponse("Collection title or product count changed; inspect before retrying."));
+
+                ShopifyShippingCollectionSourceInfo? source = before.Sources
+                    .FirstOrDefault(item => item.SourceGid == request.SourceGid);
+
+                if (source == null || source.SourceType != "CollectionConditionsSource"
+                    || source.TargetType != "PRODUCTS"
+                    || source.InclusionConditionCount != 0
+                    || source.HasExclusions
+                    || !source.HasExplicitSelections)
+                    return Conflict(new ErrorResponse(
+                        "Source is not an uncomplicated manual product-selection source. Do not modify it."));
+
+                ShopifyShippingMembershipAudit? audit =
+                    await shopifyAdminService.AuditShippingCollectionMembershipAsync(collectionGid);
+                if (audit == null || audit.ProductCount != before.ProductCount)
+                    return Conflict(new ErrorResponse("Collection changed while inspecting membership."));
+
+                ShopifyShippingSourceMembershipAudit? memberSource =
+                    audit.Sources.FirstOrDefault(item => item.SourceGid == request.SourceGid);
+                if (memberSource == null || memberSource.MoreManualSelections)
+                    return Conflict(new ErrorResponse(
+                        "Manual membership cannot be verified from this page. No changes made."));
+
+                if (!memberSource.ManualSelectionProductGids.Contains(request.ProductGid))
+                    return Conflict(new ErrorResponse(
+                        "Product is not explicitly selected in this source. No changes made."));
+
+                bool sourceWouldBecomeEmpty =
+                    memberSource.ManualSelectionProductGids.Count == 1;
+
+                // Never delete the only remaining source, and never delete a
+                // manual source unless a separate unrestricted automatic source
+                // for this same policy remains. This prevents removing unrelated
+                // inventory or leaving the collection without shipping members.
+                if (sourceWouldBecomeEmpty)
+                {
+                    string expectedShippingTag = $"ShippingClass_{id}";
+                    bool replacementTagSource = before.Sources.Any(other =>
+                        other.SourceGid != request.SourceGid
+                        && other.SourceType == "CollectionConditionsSource"
+                        && other.TargetType == "PRODUCTS"
+                        && other.InclusionConditionCount == 1
+                        && !other.HasExclusions
+                        && !other.HasExplicitSelections
+                        && other.TagConditions.Count == 1
+                        && other.TagConditions[0].Relation == "TAGGED_WITH"
+                        && other.TagConditions[0].MatchType == "ANY"
+                        && other.TagConditions[0].Values.Count == 1
+                        && string.Equals(other.TagConditions[0].Values[0],
+                            expectedShippingTag, StringComparison.OrdinalIgnoreCase));
+
+                    if (!replacementTagSource)
+                        return Conflict(new ErrorResponse(
+                            "Cannot remove last manual selection without a verified, unrestricted shipping-tag source."));
+                }
+
+                // Re-read just before mutation to catch source-condition changes.
+                ShopifyShippingCollectionInfo? confirm =
+                    await shopifyAdminService.GetShippingCollectionAsync(collectionGid);
+                if (confirm == null || confirm.ProductCount != before.ProductCount
+                    || !confirm.Sources.Select(item => item.SourceGid)
+                        .OrderBy(value => value, StringComparer.Ordinal)
+                        .SequenceEqual(before.Sources.Select(item => item.SourceGid)
+                            .OrderBy(value => value, StringComparer.Ordinal), StringComparer.Ordinal))
+                    return Conflict(new ErrorResponse("Collection changed during preflight; no changes made."));
+
+                failureStage = "shopify_mutation";
+                // Shopify forbids empty condition-based sources. Remove the
+                // exhausted manual source only if this is its sole product;
+                // otherwise remove just the requested product selection.
+                ShopifyShippingManualSelectionMutationResult mutation =
+                    sourceWouldBecomeEmpty
+                    ? await shopifyAdminService.DeleteEmptyingManualSourceAsync(
+                        collectionGid, request.SourceGid)
+                    : await shopifyAdminService.RemoveManualProductSelectionAsync(
+                        collectionGid, request.SourceGid, request.ProductGid);
+
+                failureStage = "post_mutation_verification";
+                bool targetedSourcePresent = mutation.SourceGids.Contains(request.SourceGid);
+                bool unrelatedSourcesPreserved = before.Sources
+                    .Where(item => item.SourceGid != request.SourceGid)
+                    .All(item => mutation.SourceGids.Contains(item.SourceGid));
+
+                if (mutation.CollectionGid != collectionGid
+                    || !unrelatedSourcesPreserved
+                    || (sourceWouldBecomeEmpty && targetedSourcePresent)
+                    || (!sourceWouldBecomeEmpty && !targetedSourcePresent))
+                    throw new ApplicationException(
+                        "Shopify source update returned an unexpected source set. Inspect before retrying.");
+
+                // Shopify may update membership asynchronously. A short read after
+                // submission is advisory, never proof of full settled membership.
+                ShopifyShippingMembershipAudit? after =
+                    await shopifyAdminService.AuditShippingCollectionMembershipAsync(collectionGid);
+                ShopifyShippingSourceMembershipAudit? afterSource =
+                    after?.Sources.FirstOrDefault(item => item.SourceGid == request.SourceGid);
+
+                return Ok(new ItemResponse<ShopifyShippingManualSelectionRemoveResult>
+                {
+                    Item = new ShopifyShippingManualSelectionRemoveResult
+                    {
+                        PolicyId = id,
+                        CollectionGid = collectionGid,
+                        ProductGid = request.ProductGid,
+                        SourceGid = request.SourceGid,
+                        RemovalSubmitted = true,
+                        JobGid = mutation.JobGid,
+                        JobDone = mutation.JobDone,
+                        SourcePreservedInMutationResponse = !sourceWouldBecomeEmpty,
+                        SourceDeleted = sourceWouldBecomeEmpty,
+                        SelectionAbsentOnImmediateRead =
+                            after == null ? null
+                            : sourceWouldBecomeEmpty
+                                ? afterSource == null
+                                : afterSource == null || afterSource.MoreManualSelections
+                                    ? null
+                                    : !afterSource.ManualSelectionProductGids.Contains(request.ProductGid),
+                        ProductAbsentFromCollectionOnImmediateRead =
+                            after == null || after.MoreCollectionProducts ? null
+                            : !after.CollectionProductGids.Contains(request.ProductGid)
+                    }
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex,
+                    "Manual shipping selection removal failed. Stage: {FailureStage}; PolicyId: {PolicyId}; Collection: {CollectionGid}; Source: {SourceGid}; Product: {ProductGid}.",
+                    failureStage, id, policy.ShopifyShippingCollectionGid,
+                    request.SourceGid, request.ProductGid);
+                return StatusCode(502, new ErrorResponse(
+                    $"Manual selection removal failed at stage '{failureStage}'. " +
+                    "Inspect Shopify membership and DEV application logs before retrying."));
+            }
+        }
+
+        // Read-only preflight for a mapped policy's existing Shopify collection.
+        [HttpGet("{id:int}/shopify-collection/tag-source-plan")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingTagSourcePlan>>> GetTagSourcePlan(
+            int id, [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            ShippingPolicy? policy = (_service.GetAll() ?? new())
+                .FirstOrDefault(item => item.Id == id && item.AllowsOnlineCheckout);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Active checkout shipping policy not found."));
+            if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                return Conflict(new ErrorResponse("Shipping policy must be mapped to an existing Shopify collection first."));
+
+            try
+            {
+                ShopifyShippingCollectionInfo? collection =
+                    await shopifyAdminService.GetShippingCollectionAsync(policy.ShopifyShippingCollectionGid);
+                if (collection == null)
+                    return NotFound(new ErrorResponse("Mapped collection does not exist in this Shopify store."));
+
+                ShopifyShippingTagSourcePlan plan = BuildTagSourcePlan(policy, collection);
+                return Ok(new ItemResponse<ShopifyShippingTagSourcePlan> { Item = plan });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Unable to prepare shipping source plan for policy {PolicyId}.", id);
+                return StatusCode(502, new ErrorResponse("Unable to inspect Shopify collection for source migration."));
+            }
+        }
+
+        // Dedicated write gate + optimistic source snapshots prevent accidental
+        // application to a different or concurrently changed collection.
+        [HttpPost("{id:int}/shopify-collection/add-tag-source")]
+        [Authorize(Policy = "PartsDelete")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingTagSourceAddResult>>> AddShippingTagSource(
+            int id,
+            [FromBody] ShopifyShippingTagSourceAddRequest request,
+            [FromServices] IShopifyAdminService shopifyAdminService,
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
+        {
+            if (request == null
+                || request.Confirmation != "ADD_SHIPPING_TAG_SOURCE"
+                || string.IsNullOrWhiteSpace(request.ExpectedTitle)
+                || request.ExpectedProductCount < 0
+                || request.ExpectedSourceGids == null)
+                return BadRequest(new ErrorResponse(
+                    "ExpectedTitle, ExpectedProductCount, ExpectedSourceGids and confirmation ADD_SHIPPING_TAG_SOURCE are required."));
+
+            if (!shopifyOptions.Value.AllowMarketDrivenShippingCollectionSourceWrites)
+                return Conflict(new ErrorResponse("Shipping collection source writes are disabled for this environment."));
+
+            ShippingPolicy? policy = (_service.GetAll() ?? new())
+                .FirstOrDefault(item => item.Id == id && item.AllowsOnlineCheckout);
+            if (policy == null)
+                return NotFound(new ErrorResponse("Active checkout shipping policy not found."));
+            if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+                return Conflict(new ErrorResponse("Policy has no Shopify collection mapping."));
+
+            try
+            {
+                if (!await shopifyAdminService.UsesMarketDrivenShippingAsync())
+                    return Conflict(new ErrorResponse("This store does not use Market-driven Shipping."));
+
+                ShopifyShippingCollectionInfo? before =
+                    await shopifyAdminService.GetShippingCollectionAsync(policy.ShopifyShippingCollectionGid);
+                if (before == null)
+                    return NotFound(new ErrorResponse("Mapped Shopify collection no longer exists."));
+
+                ShopifyShippingTagSourcePlan plan = BuildTagSourcePlan(policy, before);
+                List<string> actualSources = plan.ExistingSourceGids;
+                List<string> expectedSources = request.ExpectedSourceGids
+                    .Where(source => !string.IsNullOrWhiteSpace(source))
+                    .OrderBy(source => source, StringComparer.Ordinal).ToList();
+
+                if (!string.Equals(before.Title, request.ExpectedTitle.Trim(), StringComparison.Ordinal)
+                    || before.ProductCount != request.ExpectedProductCount
+                    || !actualSources.SequenceEqual(expectedSources, StringComparer.Ordinal))
+                    return Conflict(new ErrorResponse("Collection changed since preview. Inspect the tag-source plan again."));
+
+                if (plan.HasConflictingShippingTagRules)
+                    return Conflict(new ErrorResponse("Collection already has conflicting shipping-class rules. Review it manually."));
+
+                if (plan.AlreadyConfigured)
+                {
+                    return Ok(new ItemResponse<ShopifyShippingTagSourceAddResult>
+                    {
+                        Item = new ShopifyShippingTagSourceAddResult
+                        {
+                            PolicyId = id, CollectionGid = before.CollectionGid,
+                            ShippingClassTag = plan.ShippingClassTag,
+                            SourceCreated = false,
+                            ProductCountBefore = before.ProductCount,
+                            ProductCountAfter = before.ProductCount,
+                            PreservedSourceGids = actualSources,
+                            CollectionAfter = before
+                        }
+                    });
+                }
+
+                ShopifyCollectionSourceCreateResult change =
+                    await shopifyAdminService.AddShippingTagSourceAsync(before.CollectionGid, plan.ShippingClassTag);
+
+                // The mutation response carries the source list. Shopify can update
+                // product membership asynchronously, so counts require later review.
+                ShopifyShippingCollectionInfo after = change.Collection;
+                HashSet<string> afterIds = after.Sources.Select(source => source.SourceGid)
+                    .ToHashSet(StringComparer.Ordinal);
+                List<string> missingSources = actualSources
+                    .Where(gid => !afterIds.Contains(gid)).ToList();
+                if (missingSources.Count != 0)
+                    throw new ApplicationException(
+                        "Shopify source update returned missing original source IDs. STOP and inspect collection before retrying.");
+
+                ShopifyShippingTagSourcePlan afterPlan = BuildTagSourcePlan(policy, after);
+                if (!afterPlan.AlreadyConfigured || afterPlan.HasConflictingShippingTagRules)
+                    throw new ApplicationException(
+                        "Shopify mutation completed but expected tag source was not verified. STOP and inspect before retrying.");
+
+                return Ok(new ItemResponse<ShopifyShippingTagSourceAddResult>
+                {
+                    Item = new ShopifyShippingTagSourceAddResult
+                    {
+                        PolicyId = id, CollectionGid = after.CollectionGid,
+                        ShippingClassTag = plan.ShippingClassTag,
+                        SourceCreated = true,
+                        ProductCountBefore = before.ProductCount,
+                        ProductCountAfter = after.ProductCount,
+                        JobDone = change.JobDone,
+                        JobGid = change.JobGid,
+                        PreservedSourceGids = actualSources,
+                        CollectionAfter = after
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed shipping tag-source append for policy {PolicyId}. Verify Shopify before any retry.", id);
+                return StatusCode(502, new ErrorResponse(
+                    "Shopify source update could not be verified. Inspect the collection before retrying; do not blindly repeat the mutation."));
+            }
+        }
+
+        private static ShopifyShippingTagSourcePlan BuildTagSourcePlan(
+            ShippingPolicy policy, ShopifyShippingCollectionInfo collection)
+        {
+            string expectedTag = $"ShippingClass_{policy.Id}";
+            bool dedicated = collection.Sources.Any(source =>
+                source.SourceType == "CollectionConditionsSource"
+                && source.TargetType == "PRODUCTS"
+                && source.InclusionConditionCount == 1
+                && !source.HasExplicitSelections
+                && !source.HasExclusions
+                && source.TagConditions.Count == 1
+                && source.TagConditions[0].Relation == "TAGGED_WITH"
+                && source.TagConditions[0].MatchType == "ANY"
+                && source.TagConditions[0].Values.Count == 1
+                && string.Equals(source.TagConditions[0].Values[0], expectedTag,
+                    StringComparison.OrdinalIgnoreCase));
+
+            bool conflict = collection.Sources
+                .SelectMany(source => source.TagConditions)
+                .SelectMany(condition => condition.Values)
+                .Any(tag => tag.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(tag, expectedTag, StringComparison.OrdinalIgnoreCase));
+
+            // Having the expected tag embedded in an unrelated, more restrictive
+            // source is also unsafe: it does not guarantee new products are included.
+            bool ambiguousExpectedTag = collection.Sources
+                .Where(source => source.TagConditions.Any(condition => condition.Values.Any(value =>
+                    string.Equals(value, expectedTag, StringComparison.OrdinalIgnoreCase))))
+                .Any(source => source.InclusionConditionCount != 1
+                    || source.HasExplicitSelections
+                    || source.HasExclusions
+                    || source.TargetType != "PRODUCTS"
+                    || source.TagConditions.Count != 1
+                    || source.TagConditions[0].Values.Count != 1
+                    || source.TagConditions[0].Relation != "TAGGED_WITH"
+                    || source.TagConditions[0].MatchType != "ANY");
+
+            return new ShopifyShippingTagSourcePlan
+            {
+                PolicyId = policy.Id,
+                PolicyName = policy.Name,
+                CollectionGid = collection.CollectionGid,
+                CollectionTitle = collection.Title,
+                ProductCount = collection.ProductCount,
+                ShippingClassTag = expectedTag,
+                ExistingSourceGids = collection.Sources
+                    .Select(source => source.SourceGid)
+                    .OrderBy(gid => gid, StringComparer.Ordinal).ToList(),
+                AlreadyConfigured = dedicated,
+                HasConflictingShippingTagRules = conflict || ambiguousExpectedTag
+            };
         }
 
         [HttpGet("shopify/profiles")]

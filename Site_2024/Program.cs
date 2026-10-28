@@ -74,6 +74,12 @@ builder.Services.AddSwaggerGen();
 // Add logging
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();
+// Azure App Service filesystem and Log Stream capture requires its dedicated
+// diagnostics provider. Keep console/debug for local development.
+if (isAzureAppService)
+{
+    builder.Logging.AddAzureWebAppDiagnostics();
+}
 
 // Configure CORS
 builder.Services.AddCors(options =>
@@ -156,6 +162,10 @@ builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IConditionService, ConditionService>();
 builder.Services.AddScoped<IShippingPoliciesService, ShippingPoliciesService>();
+// SQL-backed, independently gated background shipping pilot.
+builder.Services.AddScoped<ShopifyShippingJobStore>();
+builder.Services.AddScoped<ShopifyShippingAsyncProcessor>();
+builder.Services.AddHostedService<ShopifyShippingJobWorker>();
 builder.Services.AddScoped<IRefundRequestService, RefundRequestService>();
 builder.Services.AddScoped<IRefundFinalizationService, RefundFinalizationService>();
 builder.Services.AddScoped<IRefundInventoryDispositionService, RefundInventoryDispositionService>();

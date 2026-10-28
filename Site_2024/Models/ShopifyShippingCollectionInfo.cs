@@ -1,0 +1,175 @@
+using System.Collections.Generic;
+
+namespace Site_2024.Web.Api.Models
+{
+    // Read-only snapshots of Shopify's 2026-07 composable collection model.
+    // We never infer collection ownership or shipping eligibility from names alone.
+    // Diagnostic only: intentionally excludes any executable reassignment token.
+    public class ShopifyShippingReassignmentPlan
+    {
+        public int PartId { get; set; }
+        public int? CurrentShippingPolicyId { get; set; }
+        public int TargetShippingPolicyId { get; set; }
+        public string? ShopifyProductGid { get; set; }
+        public bool MarketDrivenShipping { get; set; }
+        public bool ShippingPolicyChanges { get; set; }
+        public bool TargetIsContactOnly { get; set; }
+        public string? CurrentCollectionGid { get; set; }
+        public string? TargetCollectionGid { get; set; }
+        public string? ExpectedTargetTag { get; set; }
+        // Null when the preview short-circuits (e.g., source and target are identical).
+        // False is reserved for an actual failed destination rule check.
+        public bool? TargetHasMatchingTagSource { get; set; }
+
+        public string? ShopifyProductStatus { get; set; }
+        public bool? ShopifyPublishedOnOnlineStore { get; set; }
+        public string? ShopifyOnlineStorePublicationGid { get; set; }
+        public List<string> ShopifyShippingClassTags { get; set; } = new();
+        public bool? CurrentShopifyTagMatchesSql { get; set; }
+        public bool? OldManualSelectionScanComplete { get; set; }
+        public List<string> OldManualSourceGidsContainingProduct { get; set; } = new();
+        public bool? AllMappedManualSelectionScansComplete { get; set; }
+        public int MappedCollectionsInspected { get; set; }
+        public List<int> UnmappedActiveCheckoutPolicyIds { get; set; } = new();
+        public List<string> CollectionsWithIncompleteScans { get; set; } = new();
+        public List<ShopifyShippingManualMembershipHit> ManualMembershipsAcrossMappedCollections { get; set; } = new();
+        public List<string> Notes { get; set; } = new();
+    }
+
+    public class ShopifyShippingManualMembershipHit
+    {
+        public int PolicyId { get; set; }
+        public string CollectionGid { get; set; } = string.Empty;
+        public string SourceGid { get; set; } = string.Empty;
+    }
+
+
+    public class ShopifyShippingReassignmentRequest
+    {
+        public int ExpectedCurrentShippingPolicyId { get; set; }
+        public int TargetShippingPolicyId { get; set; }
+        public string ExpectedShopifyProductGid { get; set; } = string.Empty;
+        public string Confirmation { get; set; } = string.Empty;
+    }
+
+    public class ShopifyShippingReassignmentResult
+    {
+        public int PartId { get; set; }
+        public int PreviousPolicyId { get; set; }
+        public int CurrentPolicyId { get; set; }
+        public string ShopifyProductGid { get; set; } = string.Empty;
+        public bool ShopifyMembershipVerified { get; set; }
+        public bool LocalPolicyUpdated { get; set; }
+        public bool PublicationRestored { get; set; }
+        public bool OriginalPublishedOnOnlineStore { get; set; }
+    }
+
+    public class ShopifyProductShippingSnapshot
+    {
+        public string ProductGid { get; set; } = string.Empty;
+        public string Status { get; set; } = string.Empty;
+        public string OnlineStorePublicationGid { get; set; } = string.Empty;
+        public bool PublishedOnOnlineStore { get; set; }
+        public List<string> ShippingClassTags { get; set; } = new();
+    }
+
+    public class ShopifyShippingCollectionInfo
+    {
+        public string CollectionGid { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public string Handle { get; set; } = string.Empty;
+        public int ProductCount { get; set; }
+        public List<ShopifyShippingCollectionSourceInfo> Sources { get; set; } = new();
+        public List<string> ShippingClassTags { get; set; } = new();
+    }
+
+    public class ShopifyShippingCollectionSourceInfo
+    {
+        public string SourceGid { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public string SourceType { get; set; } = string.Empty;
+        public string InclusionMatchType { get; set; } = string.Empty;
+        public string TargetType { get; set; } = string.Empty;
+        public int InclusionConditionCount { get; set; }
+        public bool HasExplicitSelections { get; set; }
+        public bool HasExclusions { get; set; }
+        public List<ShopifyShippingCollectionTagCondition> TagConditions { get; set; } = new();
+    }
+
+    public class ShopifyShippingCollectionTagCondition
+    {
+        public string Relation { get; set; } = string.Empty;
+        public string MatchType { get; set; } = string.Empty;
+        public List<string> Values { get; set; } = new();
+    }
+
+    public class ShopifyShippingCollectionPage
+    {
+        public List<ShopifyShippingCollectionInfo> Collections { get; set; } = new();
+        public bool HasNextPage { get; set; }
+        public string? EndCursor { get; set; }
+    }
+
+
+    // A small read-only sample, not a full inventory export. Confirms whether
+    // Shopify exposes the original products through the collection and source.
+    public class ShopifyShippingMembershipAudit
+    {
+        public string CollectionGid { get; set; } = string.Empty;
+        public string CollectionTitle { get; set; } = string.Empty;
+        public int ProductCount { get; set; }
+        public List<string> CollectionProductGids { get; set; } = new();
+        public bool MoreCollectionProducts { get; set; }
+        public List<ShopifyShippingSourceMembershipAudit> Sources { get; set; } = new();
+    }
+
+    public class ShopifyShippingSourceMembershipAudit
+    {
+        public string SourceGid { get; set; } = string.Empty;
+        public string SourceType { get; set; } = string.Empty;
+        public List<string> SourceProductGids { get; set; } = new();
+        public bool MoreSourceProducts { get; set; }
+        public List<string> ManualSelectionProductGids { get; set; } = new();
+        public bool MoreManualSelections { get; set; }
+    }
+
+    public class ShopifyShippingManualSelectionRemoveRequest
+    {
+        public string ProductGid { get; set; } = string.Empty;
+        public string SourceGid { get; set; } = string.Empty;
+        public string ExpectedTitle { get; set; } = string.Empty;
+        public int ExpectedProductCount { get; set; } = -1;
+        public string Confirmation { get; set; } = string.Empty;
+    }
+
+    public class ShopifyShippingManualSelectionRemoveResult
+    {
+        public int PolicyId { get; set; }
+        public string CollectionGid { get; set; } = string.Empty;
+        public string SourceGid { get; set; } = string.Empty;
+        public string ProductGid { get; set; } = string.Empty;
+        // Accepted by Shopify, but collection membership might still be processing.
+        public bool RemovalSubmitted { get; set; }
+        public bool? JobDone { get; set; }
+        public string? JobGid { get; set; }
+        public bool SourcePreservedInMutationResponse { get; set; }
+        public bool SourceDeleted { get; set; }
+        public bool? SelectionAbsentOnImmediateRead { get; set; }
+        public bool? ProductAbsentFromCollectionOnImmediateRead { get; set; }
+    }
+
+    public class ShopifyShippingManualSelectionMutationResult
+    {
+        public string CollectionGid { get; set; } = string.Empty;
+        public List<string> SourceGids { get; set; } = new();
+        public string? JobGid { get; set; }
+        public bool? JobDone { get; set; }
+    }
+
+    public class ShopifyShippingCollectionAdoptionRequest
+    {
+        public string CollectionGid { get; set; } = string.Empty;
+        // Require the administrator to confirm the exact title shown by Shopify.
+        public string ExpectedTitle { get; set; } = string.Empty;
+    }
+}

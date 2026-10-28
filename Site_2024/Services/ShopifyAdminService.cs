@@ -13,22 +13,31 @@ namespace Site_2024.Web.Api.Services
     {
         private readonly HttpClient _httpClient;
         private readonly IShopifyTokenService _tokenService;
+        private readonly IShippingPoliciesService _shippingPoliciesService;
         private readonly ShopifySettings _settings;
         private readonly ILogger<ShopifyAdminService> _logger;
 
         public ShopifyAdminService(
             HttpClient httpClient,
             IShopifyTokenService tokenService,
+            IShippingPoliciesService shippingPoliciesService,
             IOptions<ShopifySettings> settings,
             ILogger<ShopifyAdminService> logger)
         {
             _httpClient = httpClient;
             _tokenService = tokenService;
+            _shippingPoliciesService = shippingPoliciesService;
             _settings = settings.Value;
             _logger = logger;
         }
+
         public async Task<ShopifyCreateProductResult> CreateProductForPartAsync(Part part)
         {
+            // Fail before creating a Shopify product or persisting its IDs when
+            // Market-driven Shipping rates have not been approved for this policy.
+            // All creation paths, including Swagger test endpoints, pass here.
+            await EnsureShippingReadyBeforeProductCreateAsync(part);
+
             string mutation = @"
 mutation CreateSitePartProduct($product: ProductCreateInput!) {
   productCreate(product: $product) {
@@ -110,6 +119,684 @@ mutation CreateSitePartProduct($product: ProductCreateInput!) {
                 ProductId = ExtractNumericId(productGid),
                 VariantId = ExtractNumericId(variantGid),
                 InventoryItemId = ExtractNumericId(inventoryItemGid)
+            };
+        }
+
+        private async Task EnsureShippingReadyBeforeProductCreateAsync(Part part)
+        {
+            if (part == null)
+                throw new ArgumentNullException(nameof(part));
+
+            // Contact-only parts are created as non-checkout listings and are
+            // unpublished by the normal sync workflow; no shipping rate applies.
+            if (part.ShippingPolicy?.AllowsOnlineCheckout == false)
+                return;
+
+            if (part.ShippingPolicy == null)
+                throw new ApplicationException("Part has no shipping policy. Shopify product was not created.");
+
+            // Leave the legacy delivery-profile workflow unchanged.
+            if (!await UsesMarketDrivenShippingAsync())
+                return;
+
+            if (!_settings.AllowMarketDrivenShippingPublishing)
+            {
+                throw new ApplicationException(
+                    "Market-driven shipping is active, but rate verification has not been approved. " +
+                    "Shopify product creation is blocked until Shopify Markets rates are validated.");
+            }
+
+            ShippingPolicy? policy = _shippingPoliciesService.GetAll()
+                .FirstOrDefault(item => item.Id == part.ShippingPolicy.Id);
+
+            if (policy == null || !policy.AllowsOnlineCheckout)
+                throw new ApplicationException("Part shipping policy is not active or checkout-enabled. Shopify product was not created.");
+
+            if (string.IsNullOrWhiteSpace(policy.ShopifyShippingCollectionGid))
+            {
+                throw new ApplicationException(
+                    $"Shipping policy '{policy.Name}' is not mapped to a Shopify Markets collection. " +
+                    "Shopify product was not created.");
+            }
+        }
+
+
+        // The new collections model exists on API 2026-07+. We use it only
+        // for discovery here; listing sources never modifies collection membership.
+        private const string ShippingCollectionFields = @"
+fragment SiteShippingCollectionFields on Collection {
+  id
+  title
+  handle
+  productsCount { count }
+  sources {
+    __typename
+    id
+    title
+    ... on CollectionConditionsSource {
+      targetType
+      exclusion {
+        conditions { __typename }
+        selections(first: 1) { nodes { product { id } } }
+      }
+      inclusion {
+        matchType
+        selections(first: 1) { nodes { product { id } } }
+        conditions {
+          __typename
+          id
+          ... on CollectionSourceInclusionConditionProductTag {
+            relation
+            values
+            matchType
+          }
+        }
+      }
+    }
+  }
+}";
+
+        public async Task<ShopifyShippingCollectionPage> GetShippingCollectionsAsync(string? after)
+        {
+            const string query = @"
+query SiteShippingCollections($after: String) {
+  collections(first: 50, after: $after) {
+    nodes { ...SiteShippingCollectionFields }
+    pageInfo { hasNextPage endCursor }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query + ShippingCollectionFields,
+                new { after = string.IsNullOrWhiteSpace(after) ? null : after.Trim() },
+                "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping collection list failed: {errors}");
+
+            JsonElement connection = root.GetProperty("data").GetProperty("collections");
+            JsonElement pageInfo = connection.GetProperty("pageInfo");
+
+            ShopifyShippingCollectionPage result = new()
+            {
+                HasNextPage = pageInfo.GetProperty("hasNextPage").GetBoolean(),
+                EndCursor = pageInfo.TryGetProperty("endCursor", out JsonElement cursor)
+                    && cursor.ValueKind == JsonValueKind.String
+                    ? cursor.GetString()
+                    : null
+            };
+
+            foreach (JsonElement node in connection.GetProperty("nodes").EnumerateArray())
+                result.Collections.Add(MapShippingCollection(node));
+
+            return result;
+        }
+
+        public async Task<ShopifyShippingCollectionInfo?> GetShippingCollectionAsync(string collectionGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("A valid Shopify Collection GID is required.", nameof(collectionGid));
+
+            const string query = @"
+query SiteShippingCollection($id: ID!) {
+  collection(id: $id) { ...SiteShippingCollectionFields }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query + ShippingCollectionFields, new { id = collectionGid }, "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping collection lookup failed: {errors}");
+
+            JsonElement collection = root.GetProperty("data").GetProperty("collection");
+            return collection.ValueKind == JsonValueKind.Null
+                ? null
+                : MapShippingCollection(collection);
+        }
+
+
+
+        // Read-only source/member comparison for cautious migration of manual
+        // collections. Product IDs only; no customer data is queried.
+        public async Task<ShopifyShippingMembershipAudit?> AuditShippingCollectionMembershipAsync(
+            string collectionGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+
+            const string query = @"
+query SiteShippingMembershipAudit($id: ID!) {
+  collection(id: $id) {
+    id
+    title
+    productsCount { count }
+    products(first: 10) {
+      nodes { id }
+      pageInfo { hasNextPage }
+    }
+    sources {
+      __typename
+      id
+      ... on CollectionConditionsSource {
+        products(first: 10) {
+          nodes { id }
+          pageInfo { hasNextPage }
+        }
+        inclusion {
+          selections(first: 10) {
+            nodes { product { id } }
+            pageInfo { hasNextPage }
+          }
+        }
+      }
+    }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query, new { id = collectionGid }, "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify membership audit failed: {errors}");
+
+            JsonElement collection = root.GetProperty("data").GetProperty("collection");
+            if (collection.ValueKind == JsonValueKind.Null)
+                return null;
+
+            JsonElement collectionProducts = collection.GetProperty("products");
+            ShopifyShippingMembershipAudit audit = new()
+            {
+                CollectionGid = collection.GetProperty("id").GetString() ?? "",
+                CollectionTitle = collection.GetProperty("title").GetString() ?? "",
+                ProductCount = collection.GetProperty("productsCount").GetProperty("count").GetInt32(),
+                CollectionProductGids = collectionProducts.GetProperty("nodes")
+                    .EnumerateArray().Select(item => item.GetProperty("id").GetString() ?? "").ToList(),
+                MoreCollectionProducts = collectionProducts.GetProperty("pageInfo")
+                    .GetProperty("hasNextPage").GetBoolean()
+            };
+
+            foreach (JsonElement source in collection.GetProperty("sources").EnumerateArray())
+            {
+                ShopifyShippingSourceMembershipAudit sourceAudit = new()
+                {
+                    SourceGid = source.GetProperty("id").GetString() ?? "",
+                    SourceType = source.GetProperty("__typename").GetString() ?? ""
+                };
+
+                if (sourceAudit.SourceType == "CollectionConditionsSource")
+                {
+                    JsonElement products = source.GetProperty("products");
+                    sourceAudit.SourceProductGids = products.GetProperty("nodes").EnumerateArray()
+                        .Select(item => item.GetProperty("id").GetString() ?? "").ToList();
+                    sourceAudit.MoreSourceProducts = products.GetProperty("pageInfo")
+                        .GetProperty("hasNextPage").GetBoolean();
+
+                    JsonElement selections = source.GetProperty("inclusion").GetProperty("selections");
+                    sourceAudit.ManualSelectionProductGids = selections.GetProperty("nodes")
+                        .EnumerateArray()
+                        .Select(item => item.GetProperty("product").GetProperty("id").GetString() ?? "")
+                        .ToList();
+                    sourceAudit.MoreManualSelections = selections.GetProperty("pageInfo")
+                        .GetProperty("hasNextPage").GetBoolean();
+                }
+
+                audit.Sources.Add(sourceAudit);
+            }
+
+            return audit;
+        }
+
+
+
+        // Shopify does not allow a conditions source with zero selections
+        // and zero conditions. If its last manual product is being reassigned,
+        // unlink that one source from the collection instead. The collection
+        // and its other sources are retained.
+        public async Task<ShopifyShippingManualSelectionMutationResult> DeleteEmptyingManualSourceAsync(
+            string collectionGid, string sourceGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify collection GID.", nameof(collectionGid));
+
+            const string prefix = "gid://shopify/CollectionConditionsSource/";
+            if (!sourceGid.StartsWith(prefix, StringComparison.Ordinal)
+                || sourceGid.Length <= prefix.Length
+                || !sourceGid[prefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Invalid Shopify collection source GID.", nameof(sourceGid));
+
+            const string mutation = @"
+mutation SiteDeleteExhaustedShippingSource($collection: CollectionUpdateInput!) {
+  collectionUpdate(collection: $collection) {
+    collection {
+      id
+      sources { id }
+    }
+    job { id done }
+    userErrors { field message }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                mutation,
+                new
+                {
+                    collection = new
+                    {
+                        id = collectionGid,
+                        sourcesToDelete = new[] { sourceGid }
+                    }
+                },
+                "2026-07");
+
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping source unlink failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionUpdate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify shipping source unlink failed");
+
+            JsonElement updated = payload.GetProperty("collection");
+            if (updated.ValueKind != JsonValueKind.Object)
+                throw new ApplicationException("Shopify did not return the collection after removing its source.");
+
+            ShopifyShippingManualSelectionMutationResult result = new()
+            {
+                CollectionGid = updated.GetProperty("id").GetString() ?? "",
+                SourceGids = updated.GetProperty("sources").EnumerateArray()
+                    .Select(item => item.GetProperty("id").GetString() ?? "").ToList()
+            };
+
+            if (payload.TryGetProperty("job", out JsonElement job)
+                && job.ValueKind == JsonValueKind.Object)
+            {
+                result.JobGid = job.GetProperty("id").GetString();
+                result.JobDone = job.GetProperty("done").GetBoolean();
+            }
+
+            return result;
+        }
+
+        // Shopify 2026-07: remove precisely one manually selected PRODUCT
+        // from one collection source. No sources or conditions are deleted.
+        // This must not be called without a guarded membership audit.
+        public async Task<ShopifyShippingManualSelectionMutationResult> RemoveManualProductSelectionAsync(
+            string collectionGid, string sourceGid, string productGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+            const string sourcePrefix = "gid://shopify/CollectionConditionsSource/";
+            const string productPrefix = "gid://shopify/Product/";
+
+            if (!sourceGid.StartsWith(sourcePrefix, StringComparison.Ordinal)
+                || sourceGid.Length <= sourcePrefix.Length
+                || !sourceGid[sourcePrefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Invalid Shopify collection source GID.", nameof(sourceGid));
+            if (!productGid.StartsWith(productPrefix, StringComparison.Ordinal)
+                || productGid.Length <= productPrefix.Length
+                || !productGid[productPrefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Invalid Shopify product GID.", nameof(productGid));
+
+            const string mutation = @"
+mutation SiteRemoveManualShippingProduct($collection: CollectionUpdateInput!) {
+  collectionUpdate(collection: $collection) {
+    collection {
+      id
+      sources { id }
+    }
+    job { id done }
+    userErrors { field message }
+  }
+}";
+            var variables = new
+            {
+                collection = new
+                {
+                    id = collectionGid,
+                    sourcesToUpdate = new[]
+                    {
+                        new
+                        {
+                            condition = new
+                            {
+                                id = sourceGid,
+                                inclusion = new
+                                {
+                                    selectionsToRemove = new[] { new { productId = productGid } }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify manual selection update failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionUpdate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify manual selection update failed");
+
+            JsonElement updated = payload.GetProperty("collection");
+            if (updated.ValueKind != JsonValueKind.Object)
+                throw new ApplicationException("Shopify did not return the updated collection.");
+            ShopifyShippingManualSelectionMutationResult result = new()
+            {
+                CollectionGid = updated.GetProperty("id").GetString() ?? string.Empty,
+                SourceGids = updated.GetProperty("sources").EnumerateArray()
+                    .Select(source => source.GetProperty("id").GetString() ?? string.Empty).ToList()
+            };
+            if (payload.TryGetProperty("job", out JsonElement job)
+                && job.ValueKind == JsonValueKind.Object)
+            {
+                result.JobGid = job.GetProperty("id").GetString();
+                result.JobDone = job.GetProperty("done").GetBoolean();
+            }
+            return result;
+        }
+
+        // Append only: no sourcesToUpdate and no sourcesToDelete fields are sent.
+        // Caller must preflight original source GIDs and verify them afterward.
+        public async Task<ShopifyCollectionSourceCreateResult> AddShippingTagSourceAsync(
+            string collectionGid, string shippingClassTag)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+            if (!shippingClassTag.StartsWith("ShippingClass_", StringComparison.Ordinal)
+                || shippingClassTag.Length <= "ShippingClass_".Length
+                || !shippingClassTag["ShippingClass_".Length..].All(char.IsDigit))
+                throw new ArgumentException("Expected a ShippingClass_<policy ID> tag.", nameof(shippingClassTag));
+
+            const string mutation = @"
+mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
+  collectionUpdate(collection: $collection) {
+    collection {
+      id
+      title
+      handle
+      productsCount { count }
+      sources {
+        __typename
+        id
+        title
+        ... on CollectionConditionsSource {
+          targetType
+          exclusion {
+        conditions { __typename }
+        selections(first: 1) { nodes { product { id } } }
+      }
+          inclusion {
+            matchType
+            selections(first: 1) { nodes { product { id } } }
+            conditions {
+              __typename
+              id
+              ... on CollectionSourceInclusionConditionProductTag {
+                relation
+                values
+                matchType
+              }
+            }
+          }
+        }
+      }
+    }
+    job { id done }
+    userErrors { field message }
+  }
+}";
+            var variables = new
+            {
+                collection = new
+                {
+                    id = collectionGid,
+                    sourcesToCreate = new[]
+                    {
+                        new
+                        {
+                            source = new
+                            {
+                                title = $"Site_2024 automated shipping tag {shippingClassTag}",
+                                inclusion = new
+                                {
+                                    matchType = "ALL",
+                                    conditions = new[]
+                                    {
+                                        new
+                                        {
+                                            productTag = new
+                                            {
+                                                relation = "TAGGED_WITH",
+                                                values = new[] { shippingClassTag },
+                                                matchType = "ANY"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify collection tag source update failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionUpdate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify collection tag source update failed");
+
+            JsonElement collection = payload.GetProperty("collection");
+            if (collection.ValueKind == JsonValueKind.Null)
+                throw new ApplicationException("Shopify returned no collection after source update.");
+
+            ShopifyCollectionSourceCreateResult result = new()
+            {
+                Collection = MapShippingCollection(collection)
+            };
+            if (payload.TryGetProperty("job", out JsonElement job)
+                && job.ValueKind == JsonValueKind.Object)
+            {
+                result.JobGid = job.GetProperty("id").GetString();
+                result.JobDone = job.GetProperty("done").GetBoolean();
+            }
+            return result;
+        }
+
+        private static bool IsValidCollectionGid(string? gid)
+        {
+            const string prefix = "gid://shopify/Collection/";
+            return gid != null
+                && gid.StartsWith(prefix, StringComparison.Ordinal)
+                && gid.Length > prefix.Length
+                && gid[prefix.Length..].All(char.IsDigit);
+        }
+
+        private static ShopifyShippingCollectionInfo MapShippingCollection(JsonElement node)
+        {
+            ShopifyShippingCollectionInfo result = new()
+            {
+                CollectionGid = node.GetProperty("id").GetString() ?? string.Empty,
+                Title = node.GetProperty("title").GetString() ?? string.Empty,
+                Handle = node.GetProperty("handle").GetString() ?? string.Empty,
+                ProductCount = node.GetProperty("productsCount").GetProperty("count").GetInt32()
+            };
+
+            foreach (JsonElement source in node.GetProperty("sources").EnumerateArray())
+            {
+                ShopifyShippingCollectionSourceInfo sourceInfo = new()
+                {
+                    SourceGid = source.GetProperty("id").GetString() ?? string.Empty,
+                    SourceType = source.GetProperty("__typename").GetString() ?? string.Empty,
+                    Title = source.GetProperty("title").GetString() ?? string.Empty,
+                    TargetType = source.TryGetProperty("targetType", out JsonElement target)
+                        && target.ValueKind == JsonValueKind.String
+                        ? target.GetString() ?? string.Empty : string.Empty,
+                    // Shopify can return an empty exclusion object even when
+                    // no products are excluded. Check rules and selections,
+                    // not whether the object exists.
+                    HasExclusions = source.TryGetProperty("exclusion", out JsonElement exclusion)
+                        && exclusion.ValueKind == JsonValueKind.Object
+                        && (exclusion.GetProperty("conditions").GetArrayLength() > 0
+                            || exclusion.GetProperty("selections").GetProperty("nodes").GetArrayLength() > 0)
+                };
+
+                if (source.TryGetProperty("inclusion", out JsonElement inclusion)
+                    && inclusion.ValueKind == JsonValueKind.Object)
+                {
+                    sourceInfo.InclusionMatchType =
+                        inclusion.GetProperty("matchType").GetString() ?? string.Empty;
+                    JsonElement conditions = inclusion.GetProperty("conditions");
+                    sourceInfo.InclusionConditionCount = conditions.GetArrayLength();
+                    sourceInfo.HasExplicitSelections = inclusion.TryGetProperty("selections", out JsonElement selections)
+                        && selections.GetProperty("nodes").GetArrayLength() > 0;
+
+                    foreach (JsonElement condition in conditions.EnumerateArray())
+                    {
+                        if (!condition.TryGetProperty("values", out JsonElement values)
+                            || values.ValueKind != JsonValueKind.Array)
+                            continue;
+
+                        ShopifyShippingCollectionTagCondition tag = new()
+                        {
+                            Relation = condition.GetProperty("relation").GetString() ?? string.Empty,
+                            MatchType = condition.GetProperty("matchType").GetString() ?? string.Empty
+                        };
+                        foreach (JsonElement value in values.EnumerateArray())
+                        {
+                            if (value.ValueKind == JsonValueKind.String)
+                                tag.Values.Add(value.GetString() ?? string.Empty);
+                        }
+                        sourceInfo.TagConditions.Add(tag);
+                    }
+                }
+
+                result.Sources.Add(sourceInfo);
+            }
+
+            result.ShippingClassTags = result.Sources
+                .SelectMany(source => source.TagConditions)
+                .Where(condition => condition.Relation == "TAGGED_WITH")
+                .SelectMany(condition => condition.Values)
+                .Where(tag => tag.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(tag => tag, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return result;
+        }
+
+        // Read-only capability probe for the 2026-07+ Markets shipping API.
+        // This deliberately leaves the existing configured API version unchanged.
+        public async Task<bool> UsesMarketDrivenShippingAsync()
+        {
+            const string query = @"
+query GetMarketDrivenShippingFeature {
+  shop {
+    features {
+      marketDrivenShipping
+    }
+  }
+}";
+
+            using JsonDocument doc = await SendGraphQlAsync(query, new { }, "2026-07");
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement errors))
+            {
+                throw new ApplicationException($"Shopify market-driven shipping query failed: {errors}");
+            }
+
+            return root.GetProperty("data")
+                .GetProperty("shop")
+                .GetProperty("features")
+                .GetProperty("marketDrivenShipping")
+                .GetBoolean();
+        }
+
+        // Provision only when explicitly requested by an administrator.
+        // The merchant still configures shipping rates against this collection in Markets.
+        public async Task<ShopifyCollectionCreateResult> CreateAutomatedShippingCollectionAsync(ShippingPolicy policy)
+        {
+            if (policy == null || policy.Id <= 0 || !policy.IsActive || !policy.AllowsOnlineCheckout)
+                throw new ArgumentException("An active, checkout-enabled shipping policy is required.", nameof(policy));
+
+            string shippingTag = $"ShippingClass_{policy.Id}";
+            string title = $"[SHIPPING] Site_2024 - {policy.Name}";
+            string handle = $"site-shipping-class-{policy.Id}";
+
+            const string mutation = @"
+mutation CreateSiteShippingCollection($collection: CollectionCreateInput!) {
+  collectionCreate(collection: $collection) {
+    collection {
+      id
+      title
+      handle
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}";
+
+            var variables = new
+            {
+                collection = new
+                {
+                    title,
+                    handle,
+                    sources = new[]
+                    {
+                        new
+                        {
+                            source = new
+                            {
+                                title = $"Shipping class {policy.Id}",
+                                inclusion = new
+                                {
+                                    matchType = "ALL",
+                                    conditions = new[]
+                                    {
+                                        new
+                                        {
+                                            productTag = new
+                                            {
+                                                relation = "TAGGED_WITH",
+                                                values = new[] { shippingTag },
+                                                matchType = "ANY"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            using JsonDocument doc = await SendGraphQlAsync(mutation, variables, "2026-07");
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify shipping collection creation failed: {errors}");
+
+            JsonElement payload = root.GetProperty("data").GetProperty("collectionCreate");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shopify shipping collection creation failed");
+
+            JsonElement created = payload.GetProperty("collection");
+            if (created.ValueKind == JsonValueKind.Null)
+                throw new ApplicationException("Shopify returned no shipping collection.");
+
+            string gid = created.GetProperty("id").GetString() ?? string.Empty;
+            if (!gid.StartsWith("gid://shopify/Collection/", StringComparison.Ordinal))
+                throw new ApplicationException("Shopify returned an invalid collection identifier.");
+
+            return new ShopifyCollectionCreateResult
+            {
+                CollectionGid = gid,
+                Title = created.GetProperty("title").GetString() ?? title,
+                Handle = created.GetProperty("handle").GetString() ?? handle
             };
         }
 
@@ -297,6 +984,150 @@ query GetLocations {
             };
         }
 
+
+
+        // Read-only shipping preflight. Publication state must be preserved by
+        // any future guarded reassignment; draft products must not go live.
+        public async Task<ShopifyProductShippingSnapshot> GetProductShippingSnapshotAsync(long productId)
+        {
+            if (productId <= 0)
+                throw new ArgumentException("A valid Shopify product ID is required.", nameof(productId));
+
+            string publicationGid = await GetOnlineStorePublicationGidAsync();
+            string productGid = $"gid://shopify/Product/{productId}";
+            const string query = @"
+query SiteShippingProductSnapshot($id: ID!, $publicationId: ID!) {
+  product(id: $id) {
+    id
+    status
+    tags
+    publishedOnPublication(publicationId: $publicationId)
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(
+                query, new { id = productGid, publicationId = publicationGid });
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify product shipping snapshot failed: {errors}");
+
+            JsonElement product = root.GetProperty("data").GetProperty("product");
+            if (product.ValueKind != JsonValueKind.Object)
+                throw new ApplicationException("Shopify product was not found for shipping preflight.");
+
+            return new ShopifyProductShippingSnapshot
+            {
+                ProductGid = product.GetProperty("id").GetString() ?? "",
+                Status = product.GetProperty("status").GetString() ?? "",
+                OnlineStorePublicationGid = publicationGid,
+                PublishedOnOnlineStore = product.GetProperty("publishedOnPublication").GetBoolean(),
+                ShippingClassTags = product.GetProperty("tags").EnumerateArray()
+                    .Select(tag => tag.GetString() ?? "")
+                    .Where(tag => tag.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                    .ToList()
+            };
+        }
+
+
+        // Exhaustive and bounded: never conclude "not present" from the first
+        // page of a Shopify collection (production may contain many products).
+        // Throw on an incomplete scan rather than permitting checkout.
+        public async Task<bool> CollectionContainsProductAsync(string collectionGid, string productGid)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Valid Shopify collection GID required.", nameof(collectionGid));
+            const string productPrefix = "gid://shopify/Product/";
+            if (string.IsNullOrWhiteSpace(productGid)
+                || !productGid.StartsWith(productPrefix, StringComparison.Ordinal)
+                || !productGid[productPrefix.Length..].All(char.IsDigit))
+                throw new ArgumentException("Valid Shopify product GID required.", nameof(productGid));
+
+            const string query = @"
+query SiteShippingCollectionProductMembership($id: ID!, $after: String) {
+  collection(id: $id) {
+    id
+    products(first: 100, after: $after) {
+      nodes { id }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}";
+            string? after = null;
+            // At most 100,000 products per collection; abort closed above that.
+            for (int pageNumber = 0; pageNumber < 1000; pageNumber++)
+            {
+                using JsonDocument doc = await SendGraphQlAsync(query,
+                    new { id = collectionGid, after }, "2026-07");
+                JsonElement root = doc.RootElement;
+                if (root.TryGetProperty("errors", out JsonElement errors))
+                    throw new ApplicationException($"Shopify collection membership scan failed: {errors}");
+                JsonElement collection = root.GetProperty("data").GetProperty("collection");
+                if (collection.ValueKind != JsonValueKind.Object)
+                    throw new ApplicationException("Shipping collection was not found.");
+
+                JsonElement members = collection.GetProperty("products");
+                if (members.GetProperty("nodes").EnumerateArray().Any(
+                    p => p.GetProperty("id").GetString() == productGid))
+                    return true;
+
+                JsonElement info = members.GetProperty("pageInfo");
+                if (!info.GetProperty("hasNextPage").GetBoolean())
+                    return false;
+
+                string? next = info.GetProperty("endCursor").GetString();
+                if (string.IsNullOrWhiteSpace(next) || next == after)
+                    throw new ApplicationException("Shopify collection pagination stalled.");
+                after = next;
+            }
+            throw new ApplicationException("Shopify collection too large to certify membership safely.");
+        }
+
+        // Migration-only: changes Shopify tags, NOT title, description, quantity or publication.
+        public async Task<bool> SyncOnlyShippingClassTagForPartAsync(Part part)
+        {
+            if (part?.ShopifyProductId.HasValue != true || part.ShippingPolicy == null)
+                throw new InvalidOperationException("Part must have a valid Shopify product and SQL shipping policy.");
+
+            string gid = $"gid://shopify/Product/{part.ShopifyProductId.Value}";
+            string[] before = await GetProductTagsAsync(gid);
+            string? desired = part.ShippingPolicy.AllowsOnlineCheckout
+                ? $"ShippingClass_{part.ShippingPolicy.Id}" : null;
+
+            string[] existingShipping = before
+                .Where(x => x.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (existingShipping.Any(x => !string.Equals(x, desired, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException(
+                    "Conflicting Shopify shipping-class tag; requires human review.");
+
+            // Conflicting classes are rejected above. The migration only needs
+            // to ADD a missing tag; do not replace the Shopify product tag list.
+            // tagsAdd is additive, preserving all unrelated tags even if other
+            // Shopify integrations write them concurrently.
+            if (desired == null || existingShipping.Length != 0)
+                return false;
+
+            const string mutation = @"
+mutation BackfillOnlyShippingClassTag($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) {
+    node { id }
+    userErrors { field message }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(mutation,
+                new { id = gid, tags = new[] { desired } });
+            var root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Tag-only update failed: {errors}");
+            var payload = root.GetProperty("data").GetProperty("tagsAdd");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shipping-class backfill failed");
+
+            string[] verified = await GetProductTagsAsync(gid);
+            if (verified.Count(x => string.Equals(x, desired,
+                    StringComparison.OrdinalIgnoreCase)) != 1 ||
+                before.Any(t => !verified.Contains(t, StringComparer.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("Tag-only update did not verify.");
+            return true;
+        }
 
         public async Task SyncProductTagsForPartAsync(Part part)
         {
@@ -1401,10 +2232,10 @@ mutation SetRefundInventoryQuantity(
             return result;
         }
 
-        private async Task<JsonDocument> SendGraphQlAsync(string query, object variables)
+        private async Task<JsonDocument> SendGraphQlAsync(string query, object variables, string? apiVersionOverride = null)
         {
             string shopDomain = NormalizeShopDomain(_settings.ShopDomain);
-            string endpoint = $"https://{shopDomain}/admin/api/{_settings.ApiVersion}/graphql.json";
+            string endpoint = $"https://{shopDomain}/admin/api/{apiVersionOverride ?? _settings.ApiVersion}/graphql.json";
             string token = await _tokenService.GetAccessTokenAsync();
 
             var body = new
