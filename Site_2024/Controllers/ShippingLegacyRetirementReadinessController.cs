@@ -42,6 +42,14 @@ namespace Site_2024.Web.Api.Controllers
             public string AutomaticProductSourceGid { get; set; } = "";
             public int SqlLinkedProducts { get; set; }
             public int CollectionProducts { get; set; }
+            public int AutoOnlyProducts { get; set; }
+            public string OriginalVariantSourceTitle { get; set; } = "";
+            // Only historic members of the original VARIANTS source belong in
+            // a recovery manifest; newly created tag-only products do not.
+            public List<PartReference> LegacyRecoverySelections { get; set; } = new();
+            public string RecoveryWarning { get; set; } =
+                "Read-only snapshot, not a tested restore. Source IDs change if recreated. " +
+                "Rehearse Shopify collectionUpdate sourcesToCreate in DEV first.";
             public int ManualSourceProducts { get; set; }
             public int ManualSelections { get; set; }
             public int ExactVariantSelectionsVerified { get; set; }
@@ -180,6 +188,7 @@ ORDER BY Id;", db);
                 }
 
                 report.OriginalVariantSourceGid = manual[0].SourceGid;
+                report.OriginalVariantSourceTitle = manual[0].Title;
                 report.AutomaticProductSourceGid = automated[0].SourceGid;
 
                 var collectionIds = await ReadAllAsync(report.CollectionGid, "collection", null, ct);
@@ -192,21 +201,31 @@ ORDER BY Id;", db);
                 report.ManualSourceProducts = manualIds.Count;
                 report.ManualSelections = selectionIds.Count;
                 report.AutomaticSourceProducts = automaticIds.Count;
+                report.AutoOnlyProducts = expected.Count - manualIds.Count;
+                report.LegacyRecoverySelections = report.RecoveryReference
+                    .Where(p => manualIds.Contains($"gid://shopify/Product/{p.ShopifyProductId}"))
+                    .ToList();
 
-                // Shopify's migrated source targets VARIANTS, while the new
-                // tag rule targets PRODUCTS. Product-level equality alone
-                // cannot prove the same precise legacy variant selections.
-                // Fail closed unless each SQL-linked variant is explicitly
-                // the ONLY selected variant for its Shopify product.
-                report.ExactVariantSelectionsVerified = report.RecoveryReference.Count(p =>
+                // The manual source is a historic SUBSET. New listings join only
+                // the automatic source. Its absence from manual is legitimate.
+                if (!manualIds.IsSubsetOf(expected))
+                    report.Problems.Add("Legacy source contains Shopify products outside this SQL policy.");
+                if (!selectionIds.SetEquals(manualIds))
+                    report.Problems.Add("Legacy explicit selections differ from actual legacy source membership.");
+                if (manualIds.Count == 0)
+                    report.Problems.Add("Legacy source has no selections; re-inspect its source configuration.");
+
+                // Check only the historic explicit variant selections, not new
+                // products that never belonged to the legacy source.
+                report.ExactVariantSelectionsVerified = report.LegacyRecoverySelections.Count(p =>
                     variantSelections.TryGetValue($"gid://shopify/Product/{p.ShopifyProductId}",
                         out List<string>? selected) && selected != null
                     && selected.Count == 1 &&
                     selected[0] == $"gid://shopify/ProductVariant/{p.ShopifyVariantId}");
 
-                if (report.ExactVariantSelectionsVerified != report.SqlLinkedProducts
-                    || variantSelections.Count != report.SqlLinkedProducts)
-                    report.Problems.Add("Legacy variant selections differ from SQL variant identities.");
+                if (report.ExactVariantSelectionsVerified != manualIds.Count
+                    || variantSelections.Count != manualIds.Count)
+                    report.Problems.Add("Legacy variant selections differ from historic SQL variant identities.");
 
                 // A PRODUCTS-targeted tag rule includes all Shopify variants
                 // of an included product. Only prove parity when each product
@@ -231,12 +250,12 @@ ORDER BY Id;", db);
                 if (report.SoleProductVariantsVerified != report.SqlLinkedProducts)
                     report.Problems.Add("A Shopify product has more than one variant or differs from its SQL variant.");
 
+                // Replacement automatic source and final union must match the
+                // entire CURRENT SQL policy inventory, including new additions.
                 if (report.CollectionProducts != expected.Count
                     || !collectionIds.SetEquals(expected)
-                    || !manualIds.SetEquals(expected)
-                    || !selectionIds.SetEquals(expected)
                     || !automaticIds.SetEquals(expected))
-                    report.Problems.Add("Full Shopify product membership differs from the SQL policy.");
+                    report.Problems.Add("Automatic source or collection differs from current SQL policy inventory.");
 
                 // Re-read SQL and collection identities after the paginated scans.
                 var sqlAfter = await ReadSqlProductsAsync(policyId, ct);
