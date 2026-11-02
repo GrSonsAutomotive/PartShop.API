@@ -194,6 +194,31 @@ query SiteDevRehearsalRead($id: ID!) {
                 await VerifyManualSelectionAsync(manualGid, productGid, variantGid, ct);
             }
 
+            // Membership updates may settle asynchronously. For this one-
+            // product test collection the existing audit's first-ten window
+            // is exhaustive. Require BOTH sources (when present) to resolve
+            // to the exact test product before any subsequent mutation.
+            ShopifyShippingMembershipAudit? audit =
+                await _shopifyAdmin.AuditShippingCollectionMembershipAsync(CollectionGid);
+            if (audit == null || audit.CollectionGid != CollectionGid ||
+                audit.ProductCount != 1 || audit.MoreCollectionProducts ||
+                audit.CollectionProductGids.Count != 1 ||
+                audit.CollectionProductGids[0] != productGid ||
+                audit.Sources.Count != parsed.Sources.Count)
+                throw new InvalidOperationException("DEV collection membership has not settled.");
+
+            foreach (ShopifyShippingSourceMembershipAudit source in audit.Sources)
+            {
+                if (source.MoreSourceProducts || source.SourceProductGids.Count != 1 ||
+                    source.SourceProductGids[0] != productGid)
+                    throw new InvalidOperationException("DEV source membership has not settled.");
+                if (source.SourceGid == manualGid &&
+                    (source.MoreManualSelections ||
+                     source.ManualSelectionProductGids.Count != 1 ||
+                     source.ManualSelectionProductGids[0] != productGid))
+                    throw new InvalidOperationException("DEV manual selections have not settled.");
+            }
+
             return new Snapshot
             {
                 ProductGid = productGid,
