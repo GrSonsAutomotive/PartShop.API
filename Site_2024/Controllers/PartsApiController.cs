@@ -303,6 +303,23 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(code, response);
                 }
 
+                // Pending inventory can become customer-visible only after
+                // stock and photographs are actually saved in SQL. New AddPart
+                // uploads its gallery AFTER the initial SQL/Shopify Draft step.
+                if (string.Equals(part.Available?.Status?.Trim(),
+                    "Pending", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (part.Quantity < 1)
+                        return Conflict(new ErrorResponse(
+                            "Part has no stock. Update its quantity before publishing."));
+
+                    List<PartImage> savedPhotos = _partImageService.GetByPartId(id);
+                    if (!(savedPhotos?.Any(img => !string.IsNullOrWhiteSpace(img.Url)) == true)
+                        && string.IsNullOrWhiteSpace(part.Image))
+                        return Conflict(new ErrorResponse(
+                            "Part has no saved photos. Upload at least one image before publishing."));
+                }
+
                 // Ensure the selected Site_2024 shipping tier is assigned before publishing.
                 await _shopifyPartSyncService.SyncShippingProfileForPartAsync(id);
 
