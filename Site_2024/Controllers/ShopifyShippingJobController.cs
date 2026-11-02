@@ -21,11 +21,13 @@ namespace Site_2024.Web.Api.Controllers
         private readonly IShopifyAdminService _shopify;
         private readonly IAuthenticationService<IUserAuthData> _auth;
         private readonly ShopifySettings _settings;
+        private readonly ShopifyShippingLegacySelectionVerifier _legacyVerifier;
 
         public ShopifyShippingJobController(ShopifyShippingJobStore store,
             IPartService parts, IShippingPoliciesService policies,
             IShopifyAdminService shopify, IAuthenticationService<IUserAuthData> auth,
-            IOptions<ShopifySettings> settings)
+            IOptions<ShopifySettings> settings,
+            ShopifyShippingLegacySelectionVerifier legacyVerifier)
         {
             _store = store;
             _parts = parts;
@@ -33,6 +35,7 @@ namespace Site_2024.Web.Api.Controllers
             _shopify = shopify;
             _auth = auth;
             _settings = settings.Value;
+            _legacyVerifier = legacyVerifier;
         }
 
         [HttpGet]
@@ -55,7 +58,7 @@ namespace Site_2024.Web.Api.Controllers
                 !_settings.AllowMarketDrivenShippingAsyncReassignmentWrites ||
                 !_settings.EnableMarketDrivenShippingAsyncWorker)
                 return Conflict(new ErrorResponse(
-                    "Asynchronous shipping reassignment is disabled until the DEV job migration and worker are enabled. No changes made."));
+                    "Asynchronous shipping reassignment is disabled until the production job schema and worker are enabled. No changes made."));
             if (!_settings.IsAsyncShippingStoreAuthorized())
                 return Conflict(new ErrorResponse(
                     "Shipping jobs are not authorized for the configured Shopify store. No changes made."));
@@ -103,6 +106,36 @@ namespace Site_2024.Web.Api.Controllers
                     return Conflict(new ErrorResponse(
                         "Part must be ACTIVE, published and use its current SQL shipping tag. Inspect an interrupted prior change first."));
 
+                // Reject older migrated products BEFORE locking the part in SQL.
+                // Original Shopify VARIANTS selections do not move when the
+                // ShippingClass tag changes. An incomplete scan fails closed.
+                await _legacyVerifier.RequireTagOnlyMembershipAsync(
+                    policies, productGid, HttpContext.RequestAborted);
+
+                ShopifyShippingCollectionInfo? destination =
+                    await _shopify.GetShippingCollectionAsync(target.ShopifyShippingCollectionGid);
+                bool correctTagRule = destination?.Sources.Any(src =>
+                    src.SourceType == "CollectionConditionsSource" &&
+                    src.TargetType == "PRODUCTS" &&
+                    src.InclusionConditionCount == 1 &&
+                    !src.HasExplicitSelections && !src.HasExclusions &&
+                    src.TagConditions.Count == 1 &&
+                    src.TagConditions[0].Relation == "TAGGED_WITH" &&
+                    src.TagConditions[0].MatchType == "ANY" &&
+                    src.TagConditions[0].Values.Count == 1 &&
+                    string.Equals(src.TagConditions[0].Values[0],
+                        $"ShippingClass_{target.Id}", StringComparison.OrdinalIgnoreCase)) == true;
+                if (!correctTagRule)
+                    return Conflict(new ErrorResponse(
+                        "Target Shopify collection does not have the expected automatic shipping tag source."));
+
+                if (!await _shopify.CollectionContainsProductAsync(
+                        old.ShopifyShippingCollectionGid, productGid) ||
+                    await _shopify.CollectionContainsProductAsync(
+                        target.ShopifyShippingCollectionGid, productGid))
+                    return Conflict(new ErrorResponse(
+                        "Shopify product is not exclusively in its original shipping collection. No changes made."));
+
                 Guid jobId = await _store.EnqueueAsync(partId, part.ShopifyProductId.Value,
                     old.Id, target.Id, user.Id, HttpContext.RequestAborted);
                 var job = await _store.GetLatestAsync(partId, HttpContext.RequestAborted);
@@ -110,6 +143,12 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(503, new ErrorResponse(
                         "Job may have been queued but status could not be read; do not submit again."));
                 return Accepted(new ItemResponse<ShopifyShippingReassignmentJob> { Item = job });
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Only read-only Shopify preflight operations run before EnqueueAsync.
+                return Conflict(new ErrorResponse(
+                    $"Shipping reassignment safety check failed. No change queued. {ex.Message}"));
             }
             catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 2601 or 2627 or 51130 or 51131 or 51132 or 51133 or 51134)
             {
