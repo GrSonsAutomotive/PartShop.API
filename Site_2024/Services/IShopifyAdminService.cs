@@ -10,6 +10,7 @@ namespace Site_2024.Web.Api.Services
         Task<List<ShopifyLocationResult>> GetLocationsAsync();
         Task<List<ShopifyDeliveryProfileResult>> GetDeliveryProfilesAsync();
         Task<bool> UsesMarketDrivenShippingAsync();
+        Task<string> GetConnectedShopDomainAsync();
         Task<ShopifyCollectionCreateResult> CreateAutomatedShippingCollectionAsync(ShippingPolicy policy);
         Task<ShopifyShippingCollectionPage> GetShippingCollectionsAsync(string? after);
         Task<ShopifyShippingCollectionInfo?> GetShippingCollectionAsync(string collectionGid);
