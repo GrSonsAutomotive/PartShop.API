@@ -44,15 +44,85 @@ namespace Site_2024.Web.Api.Services
                 checkout.Any(p => string.IsNullOrWhiteSpace(p.ShopifyShippingCollectionGid)))
                 throw new InvalidOperationException("Some active checkout policies are not mapped.");
 
-            foreach (string gid in checkout.Select(p => p.ShopifyShippingCollectionGid!)
-                .Distinct(StringComparer.Ordinal))
+            // Shopify's sample audit exposes at most ten explicit selections.
+            // That MUST NOT be used as proof of no manual legacy membership.
+            // Exhaust the independent selections cursor for every original
+            // source, across every mapped shipping collection, before writing.
+            foreach (var group in checkout.GroupBy(
+                p => p.ShopifyShippingCollectionGid!, StringComparer.Ordinal))
             {
-                var audit = await _shopify.AuditShippingCollectionMembershipAsync(gid);
-                if (audit == null || audit.CollectionGid != gid ||
-                    audit.Sources.Any(s => s.SourceType != "CollectionConditionsSource" ||
-                        s.MoreManualSelections || s.ManualSelectionProductGids.Contains(productGid)))
-                    throw new InvalidOperationException(
-                        "A Shopify shipping collection contains manual/unknown membership or cannot be completely audited.");
+                var collection = await _shopify.GetShippingCollectionAsync(group.Key);
+                if (collection == null || collection.CollectionGid != group.Key ||
+                    collection.Sources.Count == 0)
+                    throw new InvalidOperationException("Mapped shipping collection unavailable.");
+
+                foreach (var source in collection.Sources)
+                {
+                    if (source.SourceType != "CollectionConditionsSource" ||
+                        source.HasExclusions)
+                        throw new InvalidOperationException("Unknown shipping membership source topology.");
+
+                    if (!source.HasExplicitSelections)
+                    {
+                        if (source.TargetType != "PRODUCTS" ||
+                            source.InclusionConditionCount != 1 ||
+                            source.TagConditions.Count != 1 ||
+                            source.TagConditions[0].Relation != "TAGGED_WITH" ||
+                            source.TagConditions[0].MatchType != "ANY" ||
+                            source.TagConditions[0].Values.Count != 1 ||
+                            !group.Any(p => string.Equals(
+                                source.TagConditions[0].Values[0],
+                                $"ShippingClass_{p.Id}",
+                                StringComparison.OrdinalIgnoreCase)))
+                            throw new InvalidOperationException(
+                                "Mapped shipping collection has an unrecognized automatic source.");
+                        continue;
+                    }
+
+                    if (source.TargetType != "VARIANTS" ||
+                        source.InclusionConditionCount != 0)
+                        throw new InvalidOperationException(
+                            "Shipping source has complex explicit selections. Reassignment not supported.");
+
+                    string? cursor = null;
+                    var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+                    bool finished = false;
+
+                    for (int pageNumber = 0; pageNumber < 50; pageNumber++)
+                    {
+                        var page = await _shopify.GetShippingMembershipPageAsync(
+                            group.Key, source.SourceGid, "selections", cursor);
+
+                        if (page == null || !page.ReadOnly ||
+                            page.Kind != "selections" ||
+                            page.CollectionGid != group.Key ||
+                            page.SourceGid != source.SourceGid ||
+                            page.Selections.Count != page.ProductGids.Count)
+                            throw new InvalidOperationException(
+                                "Shopify legacy source selection scan is incomplete.");
+
+                        if (page.ProductGids.Contains(productGid))
+                            throw new InvalidOperationException(
+                                "Product has a legacy explicit variant selection. " +
+                                "Changing a tag alone cannot safely change shipping.");
+
+                        if (!page.HasNextPage)
+                        {
+                            finished = true;
+                            break;
+                        }
+
+                        if (string.IsNullOrWhiteSpace(page.EndCursor) ||
+                            !seenCursors.Add(page.EndCursor))
+                            throw new InvalidOperationException(
+                                "Invalid Shopify legacy selection cursor.");
+                        cursor = page.EndCursor;
+                    }
+
+                    if (!finished)
+                        throw new InvalidOperationException(
+                            "Legacy selection list exceeded bounded full-scan pagination.");
+                }
             }
         }
 
