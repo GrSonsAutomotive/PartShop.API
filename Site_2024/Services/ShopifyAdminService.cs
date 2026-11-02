@@ -899,6 +899,24 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
 
         // Read-only capability probe for the 2026-07+ Markets shipping API.
         // This deliberately leaves the existing configured API version unchanged.
+        // Do not rely on appsettings.Development.json naming or hostname:
+        // query the actual store that accepted this app's Shopify credentials.
+        public async Task<string> GetConnectedShopDomainAsync()
+        {
+            const string query = @"query SiteShopIdentity { shop { myshopifyDomain } }";
+            using JsonDocument doc = await SendGraphQlAsync(query, null, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify store identity lookup failed: {errors}");
+
+            string? domain = root.GetProperty("data").GetProperty("shop")
+                .GetProperty("myshopifyDomain").GetString();
+            if (string.IsNullOrWhiteSpace(domain) ||
+                !domain.Trim().EndsWith(".myshopify.com", StringComparison.OrdinalIgnoreCase))
+                throw new ApplicationException("Shopify returned an invalid store identity.");
+            return domain.Trim().ToLowerInvariant();
+        }
+
         public async Task<bool> UsesMarketDrivenShippingAsync()
         {
             const string query = @"
