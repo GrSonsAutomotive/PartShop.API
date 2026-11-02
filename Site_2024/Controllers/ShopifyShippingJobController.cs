@@ -109,8 +109,16 @@ namespace Site_2024.Web.Api.Controllers
                 // Reject older migrated products BEFORE locking the part in SQL.
                 // Original Shopify VARIANTS selections do not move when the
                 // ShippingClass tag changes. An incomplete scan fails closed.
-                await _legacyVerifier.RequireTagOnlyMembershipAsync(
-                    policies, productGid, HttpContext.RequestAborted);
+                try
+                {
+                    await _legacyVerifier.RequireTagOnlyMembershipAsync(
+                        policies, productGid, HttpContext.RequestAborted);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Conflict(new ErrorResponse(
+                        $"Legacy Shopify selection safety check failed. No change queued. {ex.Message}"));
+                }
 
                 ShopifyShippingCollectionInfo? destination =
                     await _shopify.GetShippingCollectionAsync(target.ShopifyShippingCollectionGid);
@@ -143,12 +151,6 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(503, new ErrorResponse(
                         "Job may have been queued but status could not be read; do not submit again."));
                 return Accepted(new ItemResponse<ShopifyShippingReassignmentJob> { Item = job });
-            }
-            catch (InvalidOperationException ex)
-            {
-                // Only read-only Shopify preflight operations run before EnqueueAsync.
-                return Conflict(new ErrorResponse(
-                    $"Shipping reassignment safety check failed. No change queued. {ex.Message}"));
             }
             catch (Microsoft.Data.SqlClient.SqlException ex) when (ex.Number is 2601 or 2627 or 51130 or 51131 or 51132 or 51133 or 51134)
             {
