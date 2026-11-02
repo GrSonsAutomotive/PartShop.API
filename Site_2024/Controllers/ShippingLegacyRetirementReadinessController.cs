@@ -126,6 +126,43 @@ ORDER BY Id;", db);
             throw new InvalidOperationException("Shopify membership exceeded bounded audit pagination.");
         }
 
+        // Read-only identity check. DEV must prove its ACTIVE Shopify URL and
+        // token resolve to an isolated test store before any source write test.
+        // A development ASP.NET environment alone does NOT make Shopify safe.
+        [HttpGet("shop-identity")]
+        [Authorize(Policy = "PartsDelete")]
+        public async Task<IActionResult> ShopIdentity(
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
+        {
+            try
+            {
+                string configured = shopifyOptions.Value.ShopDomain.Trim().ToLowerInvariant();
+                string actual = await _shopify.GetConnectedShopDomainAsync();
+                const string expectedDev = "gr-sons-shipping-dev.myshopify.com";
+                bool matches = string.Equals(actual, configured, StringComparison.OrdinalIgnoreCase);
+                bool isolatedDev = matches &&
+                    string.Equals(actual, expectedDev, StringComparison.OrdinalIgnoreCase);
+
+                return Ok(new
+                {
+                    readOnly = true,
+                    configuredShopDomain = configured,
+                    actualShopDomain = actual,
+                    configuredMatchesActual = matches,
+                    isolatedDevStoreVerified = isolatedDev,
+                    devRehearsalWritesEnabled = false,
+                    message = isolatedDev
+                        ? "Store identity matches expected DEV store; mutations remain disabled."
+                        : "NOT an isolated DEV Shopify store. No source deletions or recreation tests."
+                });
+            }
+            catch (Exception)
+            {
+                return StatusCode(502,
+                    "Unable to verify Shopify store identity. No Shopify source changes permitted.");
+            }
+        }
+
         [HttpGet("retirement-plan/{policyId:int}")]
         [Authorize(Policy = "PartsDelete")]
         public async Task<IActionResult> RetirementPlan(int policyId, CancellationToken ct)
