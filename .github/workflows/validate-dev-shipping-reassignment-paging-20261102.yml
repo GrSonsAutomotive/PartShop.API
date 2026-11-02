@@ -1,0 +1,17 @@
+name: Validate DEV Shipping Reassignment Paging (BUILD ONLY)
+on:
+  push:
+    branches:
+      - feat/dev-shipping-job-full-membership-audit-20261102
+permissions:
+  contents: read
+jobs:
+  build-no-deploy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+      - name: Compile DEV worker full source audit (no Azure deployment)
+        run: dotnet build --configuration Release
