@@ -657,9 +657,8 @@ namespace Site_2024.Web.Api.Controllers
         }
 
         // Read-only preview. Intentionally does not authorize a shipping-policy
-        // reassignment. Migrated collections can have manual memberships that
-        // survive product tag changes, and audits currently show only 10 selections
-        // per source. Ambiguous/partial membership scans are explicitly flagged.
+        // reassignment. Existing legacy variant selections may survive tag
+        // changes. Paginate every selection source before judging eligibility.
         [HttpGet("{id:int}/shopify/shipping-reassignment-plan")]
         [Authorize(Policy = "AdminAction")]
         public async Task<ActionResult<ItemResponse<ShopifyShippingReassignmentPlan>>> GetShippingReassignmentPlan(
@@ -714,56 +713,14 @@ namespace Site_2024.Web.Api.Controllers
                 }
                 else
                 {
-                    // This is a preview, not a verified plan for executing writes.
-                    // A production-grade reassignment must check every mapped
-                    // collection and paginate every manual source.
-                    if (current?.AllowsOnlineCheckout == true)
+                    // The complete cross-policy scan below is authoritative.
+                    // Do not infer "no legacy membership" from the first ten
+                    // Shopify selections returned by the old sample-only audit.
+                    if (current?.AllowsOnlineCheckout == true &&
+                        string.IsNullOrWhiteSpace(current.ShopifyShippingCollectionGid))
                     {
-                        if (string.IsNullOrWhiteSpace(current.ShopifyShippingCollectionGid))
-                        {
-                            plan.Notes.Add("Current policy has no mapped collection; membership cannot be inspected.");
-                            plan.OldManualSelectionScanComplete = false;
-                        }
-                        else
-                        {
-                            ShopifyShippingCollectionInfo? sourceCollection =
-                                await _shopifyAdminService.GetShippingCollectionAsync(
-                                    current.ShopifyShippingCollectionGid);
-                            ShopifyShippingMembershipAudit? audit =
-                                await _shopifyAdminService.AuditShippingCollectionMembershipAsync(
-                                    current.ShopifyShippingCollectionGid);
-
-                            if (sourceCollection == null || audit == null)
-                            {
-                                plan.OldManualSelectionScanComplete = false;
-                                plan.Notes.Add("Current shipping collection could not be audited.");
-                            }
-                            else
-                            {
-                                plan.OldManualSelectionScanComplete = true;
-                                foreach (ShopifyShippingSourceMembershipAudit member in audit.Sources)
-                                {
-                                    ShopifyShippingCollectionSourceInfo? source =
-                                        sourceCollection.Sources.FirstOrDefault(s => s.SourceGid == member.SourceGid);
-                                    if (member.MoreManualSelections || source == null)
-                                    {
-                                        plan.OldManualSelectionScanComplete = false;
-                                        continue;
-                                    }
-                                    if (member.ManualSelectionProductGids.Contains(plan.ShopifyProductGid!))
-                                    {
-                                        plan.OldManualSourceGidsContainingProduct.Add(member.SourceGid);
-                                        if (source.SourceType != "CollectionConditionsSource"
-                                            || source.TargetType != "PRODUCTS"
-                                            || source.InclusionConditionCount != 0
-                                            || source.HasExclusions)
-                                            plan.Notes.Add("The part has a complex manually selected source requiring separate review.");
-                                    }
-                                }
-                                if (plan.OldManualSelectionScanComplete != true)
-                                    plan.Notes.Add("Some manual source selections exceed the first audit page; full pagination is required.");
-                            }
-                        }
+                        plan.OldManualSelectionScanComplete = false;
+                        plan.Notes.Add("Current policy has no mapped collection; cannot certify manual membership.");
                     }
 
                     if (target.AllowsOnlineCheckout)
@@ -797,19 +754,17 @@ namespace Site_2024.Web.Api.Controllers
                     }
                 }
 
-                // Cross-policy audit: migration may leave historical manual memberships
-                // outside the current SQL policy collection. Sampled source selections
-                // are never treated as complete when Shopify reports another page.
+                // Exhaustive READ-ONLY scan of EVERY explicit source in every
+                // mapped checkout collection. Shopify's sampled first-ten audit
+                // is NOT evidence that an older product has no legacy selection.
+                // The result is diagnostic only: production writes remain blocked.
                 if (marketDriven && plan.ShippingPolicyChanges && part.ShopifyProductId.HasValue)
                 {
                     var checkoutPolicies = policies
-                        .Where(p => p.IsActive && p.AllowsOnlineCheckout)
-                        .ToList();
-
+                        .Where(p => p.IsActive && p.AllowsOnlineCheckout).ToList();
                     plan.UnmappedActiveCheckoutPolicyIds = checkoutPolicies
                         .Where(p => string.IsNullOrWhiteSpace(p.ShopifyShippingCollectionGid))
                         .Select(p => p.Id).OrderBy(v => v).ToList();
-
                     plan.AllMappedManualSelectionScansComplete =
                         plan.UnmappedActiveCheckoutPolicyIds.Count == 0;
 
@@ -818,65 +773,142 @@ namespace Site_2024.Web.Api.Controllers
                         .GroupBy(p => p.ShopifyShippingCollectionGid!, StringComparer.Ordinal))
                     {
                         plan.MappedCollectionsInspected++;
+                        bool complete = true;
                         try
                         {
-                            ShopifyShippingMembershipAudit? audit =
-                                await _shopifyAdminService.AuditShippingCollectionMembershipAsync(group.Key);
-                            if (audit == null || audit.CollectionGid != group.Key)
+                            var collection = await _shopifyAdminService.GetShippingCollectionAsync(group.Key);
+                            if (collection == null || collection.CollectionGid != group.Key ||
+                                collection.Sources.Count == 0)
                             {
-                                plan.AllMappedManualSelectionScansComplete = false;
-                                plan.CollectionsWithIncompleteScans.Add(group.Key);
-                                continue;
+                                complete = false;
                             }
-
-                            bool scanComplete = true;
-                            foreach (ShopifyShippingSourceMembershipAudit source in audit.Sources)
+                            else
                             {
-                                // Unknown source types cannot be certified by the
-                                // manual-selection query; never assume they're empty.
-                                if (source.SourceType != "CollectionConditionsSource"
-                                    || source.MoreManualSelections)
+                                foreach (var source in collection.Sources)
                                 {
-                                    scanComplete = false;
-                                }
-
-                                if (source.ManualSelectionProductGids.Contains(plan.ShopifyProductGid!))
-                                {
-                                    foreach (ShippingPolicy mappedPolicy in group)
+                                    if (source.SourceType != "CollectionConditionsSource" ||
+                                        source.HasExclusions)
                                     {
-                                        plan.ManualMembershipsAcrossMappedCollections.Add(
-                                            new ShopifyShippingManualMembershipHit
+                                        complete = false;
+                                        continue;
+                                    }
+
+                                    if (source.HasExplicitSelections)
+                                    {
+                                        // Legacy source must be a recognizable
+                                        // VARIANTS-only selection source. Report
+                                        // unusual source topology as unverified.
+                                        if (source.TargetType != "VARIANTS" ||
+                                            source.InclusionConditionCount != 0)
+                                        {
+                                            complete = false;
+                                            continue;
+                                        }
+
+                                        string? cursor = null;
+                                        var cursors = new HashSet<string>(StringComparer.Ordinal);
+                                        bool sourceComplete = false;
+                                        bool found = false;
+                                        for (int pageNumber = 0; pageNumber < 50; pageNumber++)
+                                        {
+                                            HttpContext.RequestAborted.ThrowIfCancellationRequested();
+                                            var page = await _shopifyAdminService.GetShippingMembershipPageAsync(
+                                                group.Key, source.SourceGid, "selections", cursor);
+                                            if (page == null || !page.ReadOnly ||
+                                                page.Kind != "selections" ||
+                                                page.CollectionGid != group.Key ||
+                                                page.SourceGid != source.SourceGid ||
+                                                page.Selections.Count != page.ProductGids.Count)
+                                                break;
+
+                                            if (page.ProductGids.Contains(plan.ShopifyProductGid!))
+                                                found = true;
+
+                                            if (!page.HasNextPage)
                                             {
-                                                PolicyId = mappedPolicy.Id,
-                                                CollectionGid = group.Key,
-                                                SourceGid = source.SourceGid
-                                            });
+                                                sourceComplete = true;
+                                                break;
+                                            }
+                                            if (string.IsNullOrWhiteSpace(page.EndCursor) ||
+                                                !cursors.Add(page.EndCursor))
+                                                break;
+                                            cursor = page.EndCursor;
+                                        }
+
+                                        if (!sourceComplete)
+                                            complete = false;
+
+                                        if (found)
+                                        {
+                                            foreach (ShippingPolicy mappedPolicy in group)
+                                            {
+                                                plan.ManualMembershipsAcrossMappedCollections.Add(
+                                                    new ShopifyShippingManualMembershipHit
+                                                    {
+                                                        PolicyId = mappedPolicy.Id,
+                                                        CollectionGid = group.Key,
+                                                        SourceGid = source.SourceGid
+                                                    });
+                                            }
+                                            if (group.Key == current?.ShopifyShippingCollectionGid)
+                                                plan.OldManualSourceGidsContainingProduct.Add(source.SourceGid);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Automatic products-only tag rules are
+                                        // allowed; unknown condition sources are
+                                        // NOT proof of safe tag-only reassignment.
+                                        if (source.TargetType != "PRODUCTS" ||
+                                            source.InclusionConditionCount != 1 ||
+                                            source.TagConditions.Count != 1 ||
+                                            source.TagConditions[0].Relation != "TAGGED_WITH" ||
+                                            source.TagConditions[0].MatchType != "ANY" ||
+                                            source.TagConditions[0].Values.Count != 1 ||
+                                            !group.Any(p => string.Equals(
+                                                source.TagConditions[0].Values[0],
+                                                $"ShippingClass_{p.Id}",
+                                                StringComparison.OrdinalIgnoreCase)))
+                                            complete = false;
                                     }
                                 }
                             }
-
-                            if (!scanComplete)
-                            {
-                                plan.AllMappedManualSelectionScansComplete = false;
-                                plan.CollectionsWithIncompleteScans.Add(group.Key);
-                            }
+                        }
+                        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+                        {
+                            throw;
                         }
                         catch (Exception scanEx)
                         {
                             Logger.LogWarning(scanEx,
-                                "Cross-policy shipping membership read failed for PartId {PartId}, Collection {CollectionGid}.",
+                                "Read-only full shipping membership scan failed for PartId {PartId}, Collection {CollectionGid}.",
                                 id, group.Key);
+                            complete = false;
+                        }
+
+                        if (group.Key == current?.ShopifyShippingCollectionGid)
+                            plan.OldManualSelectionScanComplete = complete;
+
+                        if (!complete)
+                        {
                             plan.AllMappedManualSelectionScansComplete = false;
                             plan.CollectionsWithIncompleteScans.Add(group.Key);
                         }
                     }
 
+                    if (current?.AllowsOnlineCheckout == true &&
+                        !string.IsNullOrWhiteSpace(current.ShopifyShippingCollectionGid) &&
+                        plan.OldManualSelectionScanComplete == null)
+                        plan.OldManualSelectionScanComplete = false;
+
                     if (plan.UnmappedActiveCheckoutPolicyIds.Count > 0)
-                        plan.Notes.Add("Some active checkout policies are unmapped; migration readiness cannot be established.");
+                        plan.Notes.Add("Some active checkout policies are unmapped. Cannot certify reassignment.");
                     if (plan.AllMappedManualSelectionScansComplete != true)
-                        plan.Notes.Add("Cross-policy manual membership scan is incomplete. Do not proceed with reassignment.");
+                        plan.Notes.Add("Complete legacy-source verification unavailable. Do not reassign.");
                     if (plan.ManualMembershipsAcrossMappedCollections.Count > 0)
-                        plan.Notes.Add("Manual memberships exist in mapped collections; automatic tag-only reassignment is not sufficient.");
+                        plan.Notes.Add("This part has historic explicit variant selections. Changing its tag alone would NOT change its shipping policy safely.");
+                    else if (plan.AllMappedManualSelectionScansComplete == true)
+                        plan.Notes.Add("No legacy explicit selections found in ANY mapped checkout collection. This is still a read-only preview.");
                 }
 
 
