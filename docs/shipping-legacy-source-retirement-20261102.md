@@ -24,6 +24,25 @@ For each target policy, save the entire JSON response with its Shopify collectio
 
 A `ready: true` result is a snapshot, not proof that Shopify can recreate the source, or that checkout shipping rules are unchanged.
 
+## CRITICAL: Verify DEV Shopify isolation
+
+The repository's `Site_2024/appsettings.Development.json` currently names
+`bx7ns0-2i.myshopify.com` (the PRODUCTION shop). Azure environment variables
+may override this, but the file alone is NOT evidence of a separate DEV store.
+**Never attempt a DEV deletion or restoration until the runtime SHOPIFY identity
+is verified as an isolated test shop.**
+
+New read-only endpoint:
+`GET /api/shipping-migration/legacy/shop-identity` (AdminHigh).
+
+On the DEV API, it must return `isolatedDevStoreVerified: true`, with BOTH
+`configuredShopDomain` and `actualShopDomain` equal to
+`gr-sons-shipping-dev.myshopify.com`. If it returns false or fails,
+**STOP**. Do not enable collection membership or source write flags.
+
+This check queries the actual Shopify store authenticated by the API token.
+It never writes to Shopify or SQL.
+
 ## DEV rehearsal only — no production writes
 
 Use `gr-sons-shipping-dev.myshopify.com` with a throwaway DEV collection containing:
