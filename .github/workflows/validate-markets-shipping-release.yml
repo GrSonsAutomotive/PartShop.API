@@ -11,6 +11,7 @@ on:
       - fix/safe-market-new-part-add-publish-20261028
       - feat/pending-publication-read-only-preview-20261102
       - feat/shipping-legacy-live-audit-v2-20261102
+      - feat/shipping-reassign-full-manual-scan-20261102
 
 permissions:
   contents: read
