@@ -1,0 +1,161 @@
+LOCAL SQL DESKTOP-3MJ1CE1; disposable database ReferenceDeletionTests_f91768c0b2d64f1b995becc9f5579045
+MODE READ_COMMITTED_SNAPSHOT=OFF
+PASS SQL: Primary category protection
+PASS SQL: Additional category protection
+PASS SQL: Fitment protection
+PASS SQL: Manufacturer atomic blocking
+PASS SQL: Shared model protection
+PASS SQL: Category name collision protection
+PASS SQL: Model punctuation collision protection
+PASS SQL: Shared model names across manufacturers protection
+PASS SQL: Deactivated historical rule protection
+PASS SQL: Expired historical rule protection
+PASS SQL: Short category prefixes allow unrelated deletion
+PASS SQL: Short model prefixes allow unrelated deletion
+PASS SQL: Exact tag and punctuation semantics
+PASS SQL: Custom tag protection
+PASS SQL: Source ID protection
+PASS SQL: Normalized rule protection
+PASS SQL: Manufacturer rule protection
+PASS SQL: Preview does not delete
+PASS SQL: Manufacturer deletion
+PASS SQL: Shared model preservation
+PASS SQL: Association deletion
+PASS SQL: Category deletion
+PASS SQL: Global model deletion
+PASS SQL: Missing record handling
+PASS SQL: Inventory or associations preserved
+PASS SQL: Sales history preserved
+PASS SQL: Custom ordering preserved
+PASS SQL: Surviving category ordering preserved
+PASS SQL: Historical rules preserved
+PASS SQL: Alphabetical category read order ignores DisplayOrder
+PASS SQL: Custom model order and surviving IDs after representative deletion
+PASS SQL: Custom manufacturer ordering retained
+PASS: SQL assertions complete; migration repetition checked separately by runner
+PASS repeated migration preserves seeded data and schema metadata
+PASS repeated migration preserves module definitions
+PASS writer-first primary inventory category: waits, then blocks deletion
+PASS writer-first additional category: waits, then blocks deletion
+PASS writer-first primary inventory make: waits, then blocks deletion
+PASS writer-first additional fitment: waits, then blocks deletion
+PASS writer-first category discount: waits, then blocks deletion
+PASS writer-first model discount: waits, then blocks deletion
+PASS writer-first make discount: waits, then blocks deletion
+PASS writer-first manufacturer discount: waits, then blocks deletion
+PASS manufacturer discount: manufacturer deletion is all or nothing
+PASS writer-first global model association: waits, then blocks deletion
+PASS writer-first manufacturer phantom association: waits, then includes both committed target rows
+PASS manufacturer phantom association: manufacturer deletion is all or nothing
+PASS writer-first discount rule retarget update: waits, then blocks deletion
+PASS writer-first fitment retarget update: waits, then blocks deletion
+PASS writer-first inventory retarget update: waits, then blocks deletion
+PASS delete-first Category: writer waits, then FK rejects dangling reference
+PASS delete-first Make: writer waits, then FK rejects dangling reference
+PASS unrelated category write proceeds while target deletion transaction is open
+PASS manufacturer exception rolls back all associations; inventory, models, ordering and rules unchanged
+PASS manufacturer success removes all target rows atomically
+PASS manufacturer success preserves both shared global models
+PASS successful manufacturer deletion preserves inventory, fitments and sales
+PASS real SQL HTTP DELETE catagories/9999 => 404
+PASS real SQL HTTP DELETE makes/9999 => 404
+PASS real SQL HTTP DELETE models/9999 => 404
+PASS real SQL HTTP DELETE makes/manufacturer?company=Missing => 404
+PASS real SQL HTTP DELETE catagories/1 => 409
+PASS real SQL HTTP DELETE makes/10 => 409
+PASS real SQL HTTP DELETE models/1 => 409
+PASS real SQL HTTP DELETE makes/manufacturer?company=Zeta => 409
+PASS real SQL HTTP preview catagories/9999/delete-check => 404
+PASS real SQL HTTP preview makes/9999/delete-check => 404
+PASS real SQL HTTP preview models/9999/delete-check => 404
+PASS real SQL HTTP preview makes/manufacturer/delete-check?company=Missing => 404
+PASS real SQL HTTP DELETE catagories/900 => 200
+PASS real SQL HTTP DELETE makes/900 => 200
+PASS real SQL HTTP DELETE models/900 => 200
+PASS real SQL HTTP DELETE makes/manufacturer?company=HttpManufacturer => 200
+PASS all successful HTTP deletions preserve inventory and sales history
+PASS actual SQL deadlock => HTTP 503
+PASS deadlock response identifies retryable rollback without stale dependency counts
+PASS deadlock leaves all data and ordering unchanged
+PASS fresh request after deadlock rechecks dependencies => 409
+MODE READ_COMMITTED_SNAPSHOT=ON
+PASS SQL: Primary category protection
+PASS SQL: Additional category protection
+PASS SQL: Fitment protection
+PASS SQL: Manufacturer atomic blocking
+PASS SQL: Shared model protection
+PASS SQL: Category name collision protection
+PASS SQL: Model punctuation collision protection
+PASS SQL: Shared model names across manufacturers protection
+PASS SQL: Deactivated historical rule protection
+PASS SQL: Expired historical rule protection
+PASS SQL: Short category prefixes allow unrelated deletion
+PASS SQL: Short model prefixes allow unrelated deletion
+PASS SQL: Exact tag and punctuation semantics
+PASS SQL: Custom tag protection
+PASS SQL: Source ID protection
+PASS SQL: Normalized rule protection
+PASS SQL: Manufacturer rule protection
+PASS SQL: Preview does not delete
+PASS SQL: Manufacturer deletion
+PASS SQL: Shared model preservation
+PASS SQL: Association deletion
+PASS SQL: Category deletion
+PASS SQL: Global model deletion
+PASS SQL: Missing record handling
+PASS SQL: Inventory or associations preserved
+PASS SQL: Sales history preserved
+PASS SQL: Custom ordering preserved
+PASS SQL: Surviving category ordering preserved
+PASS SQL: Historical rules preserved
+PASS SQL: Alphabetical category read order ignores DisplayOrder
+PASS SQL: Custom model order and surviving IDs after representative deletion
+PASS SQL: Custom manufacturer ordering retained
+PASS: SQL assertions complete; migration repetition checked separately by runner
+PASS repeated migration preserves seeded data and schema metadata
+PASS repeated migration preserves module definitions
+PASS writer-first primary inventory category: waits, then blocks deletion
+PASS writer-first additional category: waits, then blocks deletion
+PASS writer-first primary inventory make: waits, then blocks deletion
+PASS writer-first additional fitment: waits, then blocks deletion
+PASS writer-first category discount: waits, then blocks deletion
+PASS writer-first model discount: waits, then blocks deletion
+PASS writer-first make discount: waits, then blocks deletion
+PASS writer-first manufacturer discount: waits, then blocks deletion
+PASS manufacturer discount: manufacturer deletion is all or nothing
+PASS writer-first global model association: waits, then blocks deletion
+PASS writer-first manufacturer phantom association: waits, then includes both committed target rows
+PASS manufacturer phantom association: manufacturer deletion is all or nothing
+PASS writer-first discount rule retarget update: waits, then blocks deletion
+PASS writer-first fitment retarget update: waits, then blocks deletion
+PASS writer-first inventory retarget update: waits, then blocks deletion
+PASS delete-first Category: writer waits, then FK rejects dangling reference
+PASS delete-first Make: writer waits, then FK rejects dangling reference
+PASS unrelated category write proceeds while target deletion transaction is open
+PASS manufacturer exception rolls back all associations; inventory, models, ordering and rules unchanged
+PASS manufacturer success removes all target rows atomically
+PASS manufacturer success preserves both shared global models
+PASS successful manufacturer deletion preserves inventory, fitments and sales
+PASS real SQL HTTP DELETE catagories/9999 => 404
+PASS real SQL HTTP DELETE makes/9999 => 404
+PASS real SQL HTTP DELETE models/9999 => 404
+PASS real SQL HTTP DELETE makes/manufacturer?company=Missing => 404
+PASS real SQL HTTP DELETE catagories/1 => 409
+PASS real SQL HTTP DELETE makes/10 => 409
+PASS real SQL HTTP DELETE models/1 => 409
+PASS real SQL HTTP DELETE makes/manufacturer?company=Zeta => 409
+PASS real SQL HTTP preview catagories/9999/delete-check => 404
+PASS real SQL HTTP preview makes/9999/delete-check => 404
+PASS real SQL HTTP preview models/9999/delete-check => 404
+PASS real SQL HTTP preview makes/manufacturer/delete-check?company=Missing => 404
+PASS real SQL HTTP DELETE catagories/900 => 200
+PASS real SQL HTTP DELETE makes/900 => 200
+PASS real SQL HTTP DELETE models/900 => 200
+PASS real SQL HTTP DELETE makes/manufacturer?company=HttpManufacturer => 200
+PASS all successful HTTP deletions preserve inventory and sales history
+PASS actual SQL deadlock => HTTP 503
+PASS deadlock response identifies retryable rollback without stale dependency counts
+PASS deadlock leaves all data and ordering unchanged
+PASS fresh request after deadlock rechecks dependencies => 409
+PASS 154 real SQL/API integration checks across both isolation modes.
+DROPPED owned disposable database ReferenceDeletionTests_f91768c0b2d64f1b995becc9f5579045
