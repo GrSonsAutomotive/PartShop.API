@@ -132,6 +132,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
 builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("PartsWrite", p => p.RequireRole("AdminLow", "AdminHigh"));
+    options.AddReferenceDeletionPolicy();
     options.AddPolicy("PartsDelete", p => p.RequireRole("AdminHigh"));
     options.AddPolicy("AdminAction", p => p.RequireRole("AdminLow", "AdminHigh")); // broad internal review access
     options.AddPolicy("RefundCommit", p => p.RequireRole("AdminHigh"));
@@ -145,6 +146,7 @@ string connString = builder.Configuration.GetConnectionString("connMSSQL");
 builder.Services.AddDbContext<ApplicationDbContext>(options => options.UseSqlServer(connString));
 builder.Services.AddScoped<IDataProvider>(_ => new DataProvider(connString));
 
+builder.Services.AddScoped<ReferenceDeletionService>();
 builder.Services.AddScoped<IPartService, PartService>();
 builder.Services.AddScoped<IPartImageService, PartImageService>();
 builder.Services.AddScoped<IAvailableService, AvailableService>();

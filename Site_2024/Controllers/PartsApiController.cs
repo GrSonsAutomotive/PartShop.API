@@ -1710,6 +1710,21 @@ namespace Site_2024.Web.Api.Controllers
                     return Conflict(new ErrorResponse(
                         "A shipping job is pending or needs attention. Deletion is blocked."));
 
+                // Safety guard for the legacy local-only DELETE path. Removing a
+                // Shopify-linked SQL part without deleting its Shopify product
+                // can leave a live, purchasable listing with no local inventory.
+                // A separate coordinated deletion workflow must handle both.
+                Part? part = _service.GetPartById(id);
+                if (part == null)
+                    return NotFound(new ErrorResponse("Part not found."));
+                if (part.ShopifyProductId.HasValue ||
+                    part.ShopifyVariantId.HasValue ||
+                    part.ShopifyInventoryItemId.HasValue)
+                    return Conflict(new ErrorResponse(
+                        "This listing is linked to Shopify. Coordinated deletion " +
+                        "must remove the Shopify listing before the local part. " +
+                        "No changes were made."));
+
                 _service.DeletePart(id);
                 response = new SuccessResponse();
             }
