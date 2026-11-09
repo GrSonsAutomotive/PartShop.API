@@ -1,0 +1,35 @@
+name: Verify reference deletion release candidate (build/test only)
+
+on:
+  push:
+    branches:
+      - ci/verify-reference-deletion-20261108
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: API build and isolated HTTP/route contract checks
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout release candidate snapshot
+        uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+      - name: Restore API solution
+        run: dotnet restore Site_2024.sln --ignore-failed-sources -p:NuGetAudit=false
+      - name: Build API release
+        run: dotnet build Site_2024.sln --configuration Release --no-restore
+      - name: Restore reference-deletion contract runner
+        run: dotnet restore tests/ReferenceDeletion.Tests/ReferenceDeletion.Tests.csproj --ignore-failed-sources -p:NuGetAudit=false
+      - name: Build reference-deletion contract runner
+        run: dotnet build tests/ReferenceDeletion.Tests/ReferenceDeletion.Tests.csproj --configuration Release --no-restore
+      - name: Run isolated HTTP contracts and production route uniqueness
+        run: dotnet run --project tests/ReferenceDeletion.Tests/ReferenceDeletion.Tests.csproj --configuration Release --no-build --no-restore
+      # The 161 real SQL/API checks were already run on a strictly disposable local SQL instance.
+      # Do not run --sql here without reviewing the isolation and SQL permissions requirements.
+      # This workflow deliberately has no Azure, Shopify, or production SQL credentials/deploy jobs.
