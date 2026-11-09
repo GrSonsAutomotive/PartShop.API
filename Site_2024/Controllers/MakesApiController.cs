@@ -168,26 +168,5 @@ namespace Site_2024.Web.Api.Controllers
             return StatusCode(code, response);
         }
 
-        [HttpDelete("{id:int}")]
-        [Authorize(Policy = "AdminAction")]
-        public ActionResult<SuccessResponse> Delete(int id)
-        {
-            int code = 200;
-            BaseResponse response;
-
-            try
-            {
-                _service.DeleteMake(id);
-                response = new SuccessResponse();
-            }
-            catch (Exception ex)
-            {
-                code = 500;
-                base.Logger.LogError(ex.ToString());
-                response = new ErrorResponse(ex.Message);
-            }
-
-            return StatusCode(code, response);
-        }
     }
 }
