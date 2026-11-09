@@ -1,4 +1,11 @@
-LOCAL SQL DESKTOP-3MJ1CE1; disposable database ReferenceDeletionTests_f91768c0b2d64f1b995becc9f5579045
+LOCAL SQL [local machine verified]; disposable database [unique runner-owned database]
+PASS ReferenceDeletion_Production_Preflight_READ_ONLY.sql: original production-name guard rejects test DB
+PASS ReferenceDeletion_Production_PostInstall_READ_ONLY.sql: original production-name guard rejects test DB
+PASS ReferenceDeletion_Production_ApiPermission_READ_ONLY.sql: original production-name guard rejects test DB
+PASS production installation defaults to HOLD without approval
+PASS HOLD guard opens no transaction
+PASS approved installation simulation commits all six modules without changing fixture data/schema identities
+PASS API-identity permission script compiles and verifies the disposable test identity
 MODE READ_COMMITTED_SNAPSHOT=OFF
 PASS SQL: Primary category protection
 PASS SQL: Additional category protection
@@ -34,7 +41,7 @@ PASS SQL: Custom model order and surviving IDs after representative deletion
 PASS SQL: Custom manufacturer ordering retained
 PASS: SQL assertions complete; migration repetition checked separately by runner
 PASS repeated migration preserves seeded data and schema metadata
-PASS repeated migration preserves module definitions
+PASS repeated migration preserves module definitions (excluding outer blank lines from SQLCMD includes)
 PASS writer-first primary inventory category: waits, then blocks deletion
 PASS writer-first additional category: waits, then blocks deletion
 PASS writer-first primary inventory make: waits, then blocks deletion
@@ -57,6 +64,7 @@ PASS manufacturer exception rolls back all associations; inventory, models, orde
 PASS manufacturer success removes all target rows atomically
 PASS manufacturer success preserves both shared global models
 PASS successful manufacturer deletion preserves inventory, fitments and sales
+PASS production route audit: 152 method/template registrations; no duplicates; canonical identity preserved; DEV controllers excluded.
 PASS real SQL HTTP DELETE catagories/9999 => 404
 PASS real SQL HTTP DELETE makes/9999 => 404
 PASS real SQL HTTP DELETE models/9999 => 404
@@ -113,7 +121,7 @@ PASS SQL: Custom model order and surviving IDs after representative deletion
 PASS SQL: Custom manufacturer ordering retained
 PASS: SQL assertions complete; migration repetition checked separately by runner
 PASS repeated migration preserves seeded data and schema metadata
-PASS repeated migration preserves module definitions
+PASS repeated migration preserves module definitions (excluding outer blank lines from SQLCMD includes)
 PASS writer-first primary inventory category: waits, then blocks deletion
 PASS writer-first additional category: waits, then blocks deletion
 PASS writer-first primary inventory make: waits, then blocks deletion
@@ -136,6 +144,7 @@ PASS manufacturer exception rolls back all associations; inventory, models, orde
 PASS manufacturer success removes all target rows atomically
 PASS manufacturer success preserves both shared global models
 PASS successful manufacturer deletion preserves inventory, fitments and sales
+PASS production route audit: 152 method/template registrations; no duplicates; canonical identity preserved; DEV controllers excluded.
 PASS real SQL HTTP DELETE catagories/9999 => 404
 PASS real SQL HTTP DELETE makes/9999 => 404
 PASS real SQL HTTP DELETE models/9999 => 404
@@ -157,5 +166,5 @@ PASS actual SQL deadlock => HTTP 503
 PASS deadlock response identifies retryable rollback without stale dependency counts
 PASS deadlock leaves all data and ordering unchanged
 PASS fresh request after deadlock rechecks dependencies => 409
-PASS 154 real SQL/API integration checks across both isolation modes.
-DROPPED owned disposable database ReferenceDeletionTests_f91768c0b2d64f1b995becc9f5579045
+PASS 161 real SQL/API integration checks across both isolation modes.
+DROPPED owned disposable database [ownership marker verified]

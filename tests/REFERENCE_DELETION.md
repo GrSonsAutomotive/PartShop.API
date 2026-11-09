@@ -1,53 +1,39 @@
-# Reference deletion review and validation
+# Production reference deletion validation
 
-The migration was tested in newly created disposable databases on local SQL
-Server. On November 8, 2026, the operator confirmed that the revised migration
-was applied successfully to Site_2024_Dev, all six SQL objects exist, and the
-read-only dependency preview returned the expected results. Production has not
-been changed by this feature preparation.
+This release candidate starts from production `master` and includes only the
+approved reference-deletion feature plus production readiness checks. It excludes
+DEV Shopify rehearsal and duplicate identity controllers. Production application
+settings, shipping/publication/queue behavior and workflows are unchanged.
 
-## DEV deployment readiness
+Release remains **ON HOLD**. No production SQL, Azure or Shopify changes are
+performed by these tests. See `database/release/REFERENCE_DELETION_RELEASE.md` for
+production preflight, guarded installation, permission verification and rollback.
+Never run the fixture SQL or the `--sql` test runner against an application database.
 
-Both feature branches target `dev`. Deploy the API before using the React deletion
-controls. Production settings and workflows are unchanged. The existing React
-DEV workflow runs on pull requests and may publish a DEV preview; the API DEV
-workflow deploys on a push to `dev`, not on draft PR creation.
+## Current candidate results
 
-Current local validation: Release API solution and test harness builds passed,
-22 API authorization/contract checks passed, and 7 React tests across 2 suites
-passed. The optimized React build passed with existing lint/CSS/tooling warnings;
-the API build reports existing nullable/package warnings. The recorded 154 SQL
-integration results below are from the earlier disposable-database run. They were
-not rerun during deployment preparation because no database changes were authorized.
+- Release API build and test-harness build passed.
+- All 31 isolated HTTP authorization/contract checks passed, including anonymous,
+  AdminLow and AdminHigh behavior across every new preview and deletion endpoint.
+- Automated route checks passed: 152 method/template registrations, no duplicates,
+  one canonical production identity endpoint and no DEV Shopify controllers.
+- All 161 real SQL/API checks passed in a new, marked disposable local database:
+  154 dependency/concurrency/HTTP checks plus 7 production-script guard/installation
+  checks. The database was verified and dropped by the runner.
+- Both READ_COMMITTED_SNAPSHOT modes are covered. Real deadlock victims return 503;
+  dependency conflicts return 409 and missing targets return 404.
+- Production-script installation is simulated only inside the marked disposable
+  database by substituting its generated name in memory. Checked-in installation
+  remains guarded to `Site_2024` and defaults to HOLD without operator approval.
 
-### SQL access prerequisite (apply separately; not executed here)
+`reference-deletion-results.txt` records the successful run with machine identifiers
+redacted. The full local log is retained outside Git. Full XML snapshots now read
+all streamed result chunks; comparisons no longer inspect only the first chunk.
+Module comparisons ignore only outer blank lines added at SQLCMD include boundaries.
 
-The migration does not grant permissions. The deployed DEV API database principal
-and its effective permissions are not available in local configuration, so access
-is **not yet independently confirmed**. The successful operator preview confirms
-API access only if it used the deployed API's actual database identity.
-
-Run `tests/reference-deletion-permissions.sql` through a connection authenticated
-as the DEV API database account. It only reads permission and ownership metadata.
-Require `CanExecute = 1` and the same effective owner for the procedure, both
-functions, and all seven referenced tables. A DBA should inspect any missing
-metadata or ownership differences before deployment.
-
-If effective EXECUTE is missing, a DBA should apply this grant in
-`Site_2024_Dev`, replacing the placeholder with the actual database user or existing
-API execution role (do not grant to `public`):
-
-```sql
-GRANT EXECUTE ON OBJECT::dbo.ReferenceData_DeleteSafe TO [DEV_API_DATABASE_USER_OR_ROLE];
-```
-
-The procedure uses static SQL against objects in the same database. With a common
-owner, ownership chaining covers the two helper functions and underlying tables;
-no additional direct function/table grants are required. The three legacy wrapper
-procedures need no new grants for this API, which calls DeleteSafe directly.
-Existing callers of wrappers retain their existing entry-point permissions.
-Do not add broad table DELETE, schema EXECUTE, or db_owner permissions as a shortcut.
-Reference: [Microsoft ownership chaining documentation](https://learn.microsoft.com/en-us/sql/relational-databases/tutorial-ownership-chains-and-context-switching).
+Production database identity, schema drift, effective API-identity permissions,
+real row counts/indexes/triggers and production-size lock behavior still require
+DBA/operator evidence. No production SQL or permission result is claimed here.
 
 ## Locking decision
 
@@ -118,7 +104,7 @@ database and inspect test-session blocking through `sys.dm_exec_requests`
 A local sysadmin test account meets these requirements. No Azure credentials,
 application connection strings, or production settings are read.
 
-Run from `C:\Projects\GR&Sons\New-Site-2024\Site_2024`:
+Run from the API release checkout root:
 
 ```powershell
 dotnet restore tests/ReferenceDeletion.Tests/ReferenceDeletion.Tests.csproj --ignore-failed-sources -p:NuGetAudit=false
@@ -142,11 +128,12 @@ there. Do not retarget the runner at an application database. A container or
 non-default instance requires a separately reviewed local-only connection change.
 This suite must not be replaced by the mocked API checks below.
 
-## Actual results
+## Historical feature-only results
 
-Final run: **154/154 real SQL/API integration checks passed**, with each case run
-under READ_COMMITTED_SNAPSHOT OFF and ON. Every result, the generated database
-name, and successful cleanup are in `reference-deletion-results.txt`.
+The original feature suite passed **154/154 real SQL/API integration checks**, with
+each case run under READ_COMMITTED_SNAPSHOT OFF and ON. The current release suite
+adds seven production-script checks and passes **161/161**; its sanitized output
+and successful cleanup are recorded in `reference-deletion-results.txt`.
 
 | Cases across both isolation modes | Passed |
 | --- | ---: |
@@ -170,7 +157,7 @@ Repeated CREATE OR ALTER can update SQL module modify timestamps; data, object
 identities, index identities and definition text are checked for unexpected changes.
 
 Additional validation: API/test-project build passed (existing NU1701 package
-compatibility warning); all 22 isolated mocked API checks passed; all 7 React tests
+compatibility warning); all 31 isolated mocked API checks passed; all 7 React tests
 across 2 suites passed. The mocked checks verify authorization without SQL and are
 reported separately from the 154 real integration checks.
 

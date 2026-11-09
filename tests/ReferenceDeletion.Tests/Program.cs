@@ -27,6 +27,7 @@ var data = new FakeProvider();
 builder.Services.AddSingleton<IDataProvider>(data);
 builder.Services.AddScoped<ReferenceDeletionService>();
 await using var app = builder.Build();
+ProductionRouteChecks.Verify(app.Services);
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
@@ -52,11 +53,15 @@ foreach (var path in new[] { "catagories/1", "makes/1", "models/1", "makes/manuf
     await Check("DELETE", "/api/" + path, null, HttpStatusCode.Unauthorized);
     await Check("DELETE", "/api/" + path, "AdminHigh", HttpStatusCode.OK);
 }
-await Check("GET", "/api/catagories/1/delete-check", "AdminLow", HttpStatusCode.Forbidden);
-await Check("GET", "/api/catagories/1/delete-check", "AdminHigh", HttpStatusCode.OK);
-if (data.Delete || data.Kind != "Category") throw new Exception("Preview requested a write.");
-await Check("GET", "/api/makes/manufacturer/delete-check?company=Zeta", "AdminHigh", HttpStatusCode.OK);
-if (data.Company != "Zeta" || data.Delete) throw new Exception("Manufacturer identity lost.");
+foreach (var path in new[] { "catagories/1/delete-check", "makes/1/delete-check",
+    "models/1/delete-check", "makes/manufacturer/delete-check?company=Zeta" })
+{
+    await Check("GET", "/api/" + path, null, HttpStatusCode.Unauthorized);
+    await Check("GET", "/api/" + path, "AdminLow", HttpStatusCode.Forbidden);
+    await Check("GET", "/api/" + path, "AdminHigh", HttpStatusCode.OK);
+    if (data.Delete) throw new Exception("Preview requested a write.");
+}
+if (data.Company != "Zeta" || data.Kind != "Manufacturer") throw new Exception("Manufacturer identity lost.");
 data.Blocked = true;
 foreach (var path in new[] { "catagories/1", "makes/1", "models/1", "makes/manufacturer?company=Zeta" })
     await Check("DELETE", "/api/" + path, "AdminHigh", HttpStatusCode.Conflict);

@@ -49,6 +49,7 @@ internal static class SqlIntegration
                 await Exec(db, $"EXEC sys.sp_addextendedproperty @name=N'ReferenceDeletionTestOwner',@value=N'{owner}'");
                 await Exec(db, File.ReadAllText(Path.Combine(root, "tests/reference-deletion-schema.sql")));
                 await Apply(db, migration);
+                await ProductionReleaseScripts(db, root);
             }
             foreach (var rcsi in new[] { false, true })
             {
@@ -65,11 +66,20 @@ internal static class SqlIntegration
                     await Exec(db, File.ReadAllText(Path.Combine(root, "tests/reference-deletion.sql")));
                     await Seed(db);
                     var before = await Snapshot(db);
-                    var definitions = await Scalar(db, "SELECT definition FROM sys.sql_modules ORDER BY object_id FOR XML PATH('module')");
+                    var definitions = await ModuleDefinitions(db);
                     await Apply(db, migration);
                     await Apply(db, migration);
                     Assert(before == await Snapshot(db), "repeated migration preserves seeded data and schema metadata");
-                    Assert(Equals(definitions, await Scalar(db, "SELECT definition FROM sys.sql_modules ORDER BY object_id FOR XML PATH('module')")), "repeated migration preserves module definitions");
+                    var afterDefinitions = await ModuleDefinitions(db);
+                    if (definitions != afterDefinitions)
+                    {
+                        var index = Enumerable.Range(0, Math.Min(definitions.Length, afterDefinitions.Length))
+                            .FirstOrDefault(i => definitions[i] != afterDefinitions[i]);
+                        throw new Exception("Module definition differs at " + index + ": "
+                            + System.Text.Json.JsonSerializer.Serialize(definitions.Substring(index, Math.Min(160, definitions.Length-index)))
+                            + " versus " + System.Text.Json.JsonSerializer.Serialize(afterDefinitions.Substring(index, Math.Min(160, afterDefinitions.Length-index))));
+                    }
+                    Pass("repeated migration preserves module definitions (excluding outer blank lines from SQLCMD includes)");
                 }
                 await Concurrency();
                 await ManufacturerRollback();
@@ -101,6 +111,57 @@ internal static class SqlIntegration
         await using var db = await Open();
         if (!Equals(await Scalar(db, "SELECT CONVERT(nvarchar(32),value) FROM sys.extended_properties WHERE class=0 AND name=N'ReferenceDeletionTestOwner'"), owner))
             throw new Exception("Database ownership marker missing. Cleanup refused.");
+    }
+
+    private static async Task ProductionReleaseScripts(SqlConnection db, string root)
+    {
+        // These scripts are never run against an application database by this test.
+        // First prove their original production-name guards reject this owned DB.
+        await VerifyOwner();
+        var directory = Path.Combine(root, "database/release");
+        var scripts = new[]
+        {
+            ("ReferenceDeletion_Production_Preflight_READ_ONLY.sql", 50510),
+            ("ReferenceDeletion_Production_PostInstall_READ_ONLY.sql", 50520),
+            ("ReferenceDeletion_Production_ApiPermission_READ_ONLY.sql", 50530)
+        };
+        foreach (var (file, error) in scripts)
+        {
+            try { await Exec(db, File.ReadAllText(Path.Combine(directory, file))); throw new Exception("Production guard did not reject disposable DB."); }
+            catch (SqlException ex) when (ex.Number == error) { Pass(file + ": original production-name guard rejects test DB"); }
+        }
+
+        // Simulate SQLCMD includes/approval only in memory, replacing the exact
+        // production guard with this verified disposable database's generated name.
+        // The checked-in production scripts remain unchanged and on HOLD.
+        var wrapper = File.ReadAllText(Path.Combine(directory, "ReferenceDeletion_Production_Install.sql"));
+        foreach (var relative in new[] {
+            @"database\release\ReferenceDeletion_Production_Preflight_READ_ONLY.sql",
+            @"database\migrations\20261107_01_ReferenceDataSafeDeletion.sql",
+            @"database\release\ReferenceDeletion_Production_PostInstall_READ_ONLY.sql" })
+            wrapper = wrapper.Replace(":r .\\" + relative, File.ReadAllText(Path.Combine(root, relative)));
+        wrapper = Regex.Replace(wrapper, @"^:.*$", "", RegexOptions.Multiline)
+            .Replace("N'Site_2024'", "N'" + database + "'");
+        async Task Batches(string script)
+        {
+            foreach (var batch in Regex.Split(script, @"^\s*GO\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase))
+                if (!string.IsNullOrWhiteSpace(batch)) await Exec(db, batch);
+        }
+        try { await Batches(wrapper.Replace("$(ReferenceDeletionApproved)", "NO")); throw new Exception("Unapproved installation was allowed."); }
+        catch (SqlException ex) when (ex.Number == 50541) { Pass("production installation defaults to HOLD without approval"); }
+        Assert(Convert.ToInt32(await Scalar(db, "SELECT @@TRANCOUNT")) == 0, "HOLD guard opens no transaction");
+
+        var before = await Snapshot(db);
+        await Batches(wrapper.Replace("$(ReferenceDeletionApproved)", "YES"));
+        Assert(Convert.ToInt32(await Scalar(db, "SELECT @@TRANCOUNT")) == 0 && before == await Snapshot(db),
+            "approved installation simulation commits all six modules without changing fixture data/schema identities");
+        var user = Convert.ToString(await Scalar(db, "SELECT USER_NAME()"))!.Replace("'", "''");
+        var permission = File.ReadAllText(Path.Combine(directory, scripts[2].Item1))
+            .Replace("N'Site_2024'", "N'" + database + "'")
+            .Replace("sysname=N'REPLACE_WITH_ACTUAL_API_DATABASE_USER';", "sysname=N'" + user + "';");
+        await Exec(db, permission);
+        Pass("API-identity permission script compiles and verifies the disposable test identity");
+        await Exec(db, "SET XACT_ABORT OFF");
     }
 
     private static async Task Seed(SqlConnection db) => await Exec(db, """
@@ -213,6 +274,7 @@ internal static class SqlIntegration
         builder.Services.AddSingleton<IDataProvider>(new DataProvider(connectionString));
         builder.Services.AddScoped<ReferenceDeletionService>();
         await using var app = builder.Build();
+        ProductionRouteChecks.Verify(app.Services);
         app.UseAuthentication(); app.UseAuthorization(); app.MapControllers();
         await app.StartAsync();
         var url = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
@@ -308,6 +370,16 @@ internal static class SqlIntegration
         result += await Scalar(db, "SELECT object_id,index_id,name FROM sys.indexes WHERE object_id IN(SELECT object_id FROM sys.tables) ORDER BY object_id,index_id FOR XML RAW");
         return result;
     }
+    private static async Task<string> ModuleDefinitions(SqlConnection db)
+    {
+        var xml = Convert.ToString(await Scalar(db,
+            "SELECT definition FROM sys.sql_modules ORDER BY object_id FOR XML PATH('module'), ROOT('modules')"))!;
+        // SQLCMD include boundaries add outer blank lines to module definitions.
+        // Compare every other character, including all internal whitespace/comments.
+        return string.Join("\u001e", System.Xml.Linq.XDocument.Parse(xml)
+            .Descendants("definition").Select(d => d.Value.Trim('\r', '\n')));
+    }
+
     private static async Task Apply(SqlConnection db, string path)
     {
         foreach (var batch in Regex.Split(File.ReadAllText(path), @"^\s*GO\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase))
@@ -327,6 +399,15 @@ internal static class SqlIntegration
     private static async Task<object?> Scalar(SqlConnection db, string sql, SqlTransaction? transaction = null)
     {
         using var command = new SqlCommand(sql, db, transaction) { CommandTimeout = 20 };
+        if (sql.Contains("FOR XML", StringComparison.OrdinalIgnoreCase))
+        {
+            // FOR XML without TYPE streams its text across result rows. ExecuteScalar
+            // returns only the first chunk, which can hide later inventory/module drift.
+            using var reader = await command.ExecuteReaderAsync();
+            var xml = new System.Text.StringBuilder();
+            while (await reader.ReadAsync()) xml.Append(reader.GetString(0));
+            return xml.ToString();
+        }
         return await command.ExecuteScalarAsync();
     }
     private static void Assert(bool condition, string message)
