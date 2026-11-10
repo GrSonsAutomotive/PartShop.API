@@ -133,6 +133,7 @@ builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("PartsWrite", p => p.RequireRole("AdminLow", "AdminHigh"));
     options.AddReferenceDeletionPolicy();
+    options.AddReferenceDeletionPolicy();
     options.AddPolicy("PartsDelete", p => p.RequireRole("AdminHigh"));
     options.AddPolicy("AdminAction", p => p.RequireRole("AdminLow", "AdminHigh")); // broad internal review access
     options.AddPolicy("RefundCommit", p => p.RequireRole("AdminHigh"));
@@ -145,6 +146,7 @@ builder.Services.AddAuthorization(options =>
 string connString = builder.Configuration.GetConnectionString("connMSSQL");
 builder.Services.AddDbContext<ApplicationDbContext>(options => options.UseSqlServer(connString));
 builder.Services.AddScoped<IDataProvider>(_ => new DataProvider(connString));
+builder.Services.AddScoped<ReferenceDeletionService>();
 
 builder.Services.AddScoped<ReferenceDeletionService>();
 builder.Services.AddScoped<IPartService, PartService>();
@@ -166,6 +168,7 @@ builder.Services.AddScoped<IConditionService, ConditionService>();
 builder.Services.AddScoped<IShippingPoliciesService, ShippingPoliciesService>();
 // SQL-backed, independently gated background shipping pilot.
 builder.Services.AddScoped<ShopifyShippingJobStore>();
+builder.Services.AddScoped<ShopifyShippingLegacySelectionVerifier>();
 builder.Services.AddScoped<ShopifyShippingAsyncProcessor>();
 builder.Services.AddHostedService<ShopifyShippingJobWorker>();
 builder.Services.AddScoped<IRefundRequestService, RefundRequestService>();

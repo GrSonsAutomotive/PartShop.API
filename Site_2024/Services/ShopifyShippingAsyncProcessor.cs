@@ -7,7 +7,7 @@ namespace Site_2024.Web.Api.Services
 {
     // A scoped reconciler: each pass checks Shopify's actual state and the SQL
     // part, rather than trusting an in-memory stage. Restart-safe and resumable.
-    // This is an intentionally DEV-store-restricted pilot, not a production cutover.
+    // Production activation requires separately configured shop identity and release flags.
     public sealed class ShopifyShippingAsyncProcessor
     {
         private readonly ShopifyShippingJobStore _store;
@@ -15,12 +15,14 @@ namespace Site_2024.Web.Api.Services
         private readonly IShippingPoliciesService _policies;
         private readonly IShopifyAdminService _shopify;
         private readonly ShopifySettings _settings;
+        private readonly ShopifyShippingLegacySelectionVerifier _legacyVerifier;
         private readonly ILogger<ShopifyShippingAsyncProcessor> _log;
 
         public ShopifyShippingAsyncProcessor(
             ShopifyShippingJobStore store, IPartService parts,
             IShippingPoliciesService policies, IShopifyAdminService shopify,
             IOptions<ShopifySettings> settings,
+            ShopifyShippingLegacySelectionVerifier legacyVerifier,
             ILogger<ShopifyShippingAsyncProcessor> log)
         {
             _store = store;
@@ -28,6 +30,7 @@ namespace Site_2024.Web.Api.Services
             _policies = policies;
             _shopify = shopify;
             _settings = settings.Value;
+            _legacyVerifier = legacyVerifier;
             _log = log;
         }
 
@@ -35,26 +38,6 @@ namespace Site_2024.Web.Api.Services
             s.ShippingClassTags.Count == 1 &&
             string.Equals(s.ShippingClassTags[0], $"ShippingClass_{policyId}",
                 StringComparison.OrdinalIgnoreCase);
-
-        private async Task AuditMappedCollectionsAsync(
-            IReadOnlyCollection<ShippingPolicy> policies, string productGid)
-        {
-            var checkout = policies.Where(p => p.IsActive && p.AllowsOnlineCheckout).ToList();
-            if (checkout.Count == 0 ||
-                checkout.Any(p => string.IsNullOrWhiteSpace(p.ShopifyShippingCollectionGid)))
-                throw new InvalidOperationException("Some active checkout policies are not mapped.");
-
-            foreach (string gid in checkout.Select(p => p.ShopifyShippingCollectionGid!)
-                .Distinct(StringComparer.Ordinal))
-            {
-                var audit = await _shopify.AuditShippingCollectionMembershipAsync(gid);
-                if (audit == null || audit.CollectionGid != gid ||
-                    audit.Sources.Any(s => s.SourceType != "CollectionConditionsSource" ||
-                        s.MoreManualSelections || s.ManualSelectionProductGids.Contains(productGid)))
-                    throw new InvalidOperationException(
-                        "A Shopify shipping collection contains manual/unknown membership or cannot be completely audited.");
-            }
-        }
 
         // Check all mapped checkout collections, not just the source and target:
         // an unexpected third membership can produce an incorrect shipping rate.
@@ -97,10 +80,8 @@ namespace Site_2024.Web.Api.Services
                 if (!_settings.AsyncShippingJobsSchemaReady ||
                     !_settings.EnableMarketDrivenShippingAsyncWorker ||
                     !_settings.AllowMarketDrivenShippingPublishing ||
-                    !string.Equals(_settings.ShopDomain,
-                        "gr-sons-shipping-dev.myshopify.com",
-                        StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("DEV shipping job worker configuration is not authorized.");
+                    !_settings.IsAsyncShippingStoreAuthorized())
+                    throw new InvalidOperationException("Shipping job worker/store configuration is not authorized.");
 
                 part = _parts.GetPartById(job.PartId);
                 if (part?.ShopifyProductId != job.ShopifyProductId ||
@@ -118,7 +99,8 @@ namespace Site_2024.Web.Api.Services
                     throw new InvalidOperationException("Shipping policy mappings changed.");
 
                 string productGid = $"gid://shopify/Product/{job.ShopifyProductId}";
-                await AuditMappedCollectionsAsync(policies, productGid);
+                await _legacyVerifier.RequireTagOnlyMembershipAsync(
+                    policies, productGid, stoppingToken);
 
                 var source = await _shopify.GetShippingCollectionAsync(target.ShopifyShippingCollectionGid);
                 bool ruleValid = source?.Sources.Any(s =>

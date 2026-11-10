@@ -348,6 +348,217 @@ query SiteShippingMembershipAudit($id: ID!) {
 
 
 
+
+
+        // Each SQL Part maps to one Shopify variant. Confirm no additional
+        // Shopify variants would unexpectedly enter a PRODUCTS-targeted tag
+        // collection after the old VARIANTS-targeted source is retired.
+        public async Task<Dictionary<string, string?>> GetSoleProductVariantsAsync(
+            IReadOnlyList<string> productGids)
+        {
+            if (productGids == null || productGids.Count == 0 || productGids.Count > 30
+                || productGids.Distinct(StringComparer.Ordinal).Count() != productGids.Count
+                || productGids.Any(gid => string.IsNullOrWhiteSpace(gid)
+                    || !gid.StartsWith("gid://shopify/Product/", StringComparison.Ordinal)
+                    || !gid["gid://shopify/Product/".Length..].All(char.IsDigit)))
+                throw new ArgumentException("Provide 1-30 distinct valid Shopify product GIDs.", nameof(productGids));
+
+            const string query = @"
+query SiteSoleProductVariantAudit($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product {
+      id
+      variants(first: 2) {
+        nodes { id }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(query,
+                new { ids = productGids }, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify variant count audit failed: {errors}");
+
+            JsonElement nodes = root.GetProperty("data").GetProperty("nodes");
+            if (nodes.GetArrayLength() != productGids.Count)
+                throw new ApplicationException("Shopify product variant count response was incomplete.");
+
+            var found = new Dictionary<string, string?>(StringComparer.Ordinal);
+            int i = 0;
+            foreach (JsonElement product in nodes.EnumerateArray())
+            {
+                string expectedId = productGids[i++];
+                if (product.ValueKind != JsonValueKind.Object ||
+                    product.GetProperty("id").GetString() != expectedId)
+                    throw new ApplicationException("Shopify variant audit returned an unexpected product.");
+
+                JsonElement variants = product.GetProperty("variants");
+                JsonElement members = variants.GetProperty("nodes");
+                bool exactlyOne = members.GetArrayLength() == 1 &&
+                    !variants.GetProperty("pageInfo").GetProperty("hasNextPage").GetBoolean();
+                string? singleVariantGid = exactlyOne
+                    ? members[0].GetProperty("id").GetString()
+                    : null;
+
+                if (singleVariantGid != null &&
+                    !singleVariantGid.StartsWith("gid://shopify/ProductVariant/", StringComparison.Ordinal))
+                    throw new ApplicationException("Shopify product had an invalid variant identifier.");
+
+                found.Add(expectedId, singleVariantGid);
+            }
+            return found;
+        }
+
+
+        // Bounded read-only paginator for full production reconciliation.
+        // Each request queries one Shopify connection with its OWN cursor.
+        // A source is first confirmed to belong to the requested collection.
+        public async Task<ShopifyShippingMembershipPage?> GetShippingMembershipPageAsync(
+            string collectionGid, string? sourceGid, string kind, string? after)
+        {
+            if (!IsValidCollectionGid(collectionGid))
+                throw new ArgumentException("Invalid Shopify Collection GID.", nameof(collectionGid));
+
+            if (kind != "collection" && kind != "source" && kind != "selections")
+                throw new ArgumentException("Expected kind=collection, source, or selections.", nameof(kind));
+            if (!string.IsNullOrEmpty(after) && after.Length > 1024)
+                throw new ArgumentException("Shopify cursor is too long.", nameof(after));
+
+            if (kind != "collection")
+            {
+                const string prefix = "gid://shopify/CollectionConditionsSource/";
+                if (string.IsNullOrWhiteSpace(sourceGid)
+                    || !sourceGid.StartsWith(prefix, StringComparison.Ordinal)
+                    || sourceGid.Length <= prefix.Length
+                    || !sourceGid[prefix.Length..].All(char.IsDigit))
+                    throw new ArgumentException("Invalid Shopify CollectionConditionsSource GID.", nameof(sourceGid));
+
+                ShopifyShippingCollectionInfo? snapshot =
+                    await GetShippingCollectionAsync(collectionGid);
+                if (snapshot == null)
+                    return null;
+                if (!snapshot.Sources.Any(x => x.SourceGid == sourceGid
+                    && x.SourceType == "CollectionConditionsSource"))
+                    throw new ArgumentException("Source is not attached to this collection.", nameof(sourceGid));
+            }
+
+            const string collectionQuery = @"
+query SiteCollectionMembershipPage($id: ID!, $after: String) {
+  collection(id: $id) {
+    id
+    products(first: 100, after: $after) {
+      nodes { id }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}";
+
+            const string sourceProductsQuery = @"
+query SiteSourceMembershipPage($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on CollectionConditionsSource {
+      id
+      products(first: 100, after: $after) {
+        nodes { id }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}";
+
+            const string selectionsQuery = @"
+query SiteSourceSelectionPage($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on CollectionConditionsSource {
+      id
+      inclusion {
+        selections(first: 100, after: $after) {
+          nodes { product { id } variantIds }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+}";
+
+            bool isCollection = kind == "collection";
+            string selectedQuery = isCollection ? collectionQuery
+                : kind == "source" ? sourceProductsQuery : selectionsQuery;
+            string requestedId = isCollection ? collectionGid : sourceGid!;
+
+            using JsonDocument doc = await SendGraphQlAsync(selectedQuery,
+                new { id = requestedId, after }, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify paginated shipping audit failed: {errors}");
+
+            JsonElement node = root.GetProperty("data")
+                .GetProperty(isCollection ? "collection" : "node");
+            if (node.ValueKind != JsonValueKind.Object)
+                return null;
+            if (!string.Equals(node.GetProperty("id").GetString(), requestedId,
+                StringComparison.Ordinal))
+                throw new ApplicationException("Shopify paginated shipping audit returned a different identity.");
+
+            JsonElement connection = kind == "selections"
+                ? node.GetProperty("inclusion").GetProperty("selections")
+                : node.GetProperty("products");
+            JsonElement pageInfo = connection.GetProperty("pageInfo");
+            var result = new ShopifyShippingMembershipPage
+            {
+                CollectionGid = collectionGid,
+                SourceGid = isCollection ? null : sourceGid,
+                Kind = kind,
+                HasNextPage = pageInfo.GetProperty("hasNextPage").GetBoolean(),
+                EndCursor = pageInfo.TryGetProperty("endCursor", out JsonElement cursor)
+                    && cursor.ValueKind == JsonValueKind.String
+                    ? cursor.GetString() : null
+            };
+
+            foreach (JsonElement item in connection.GetProperty("nodes").EnumerateArray())
+            {
+                string? productId = kind == "selections"
+                    ? item.GetProperty("product").GetProperty("id").GetString()
+                    : item.GetProperty("id").GetString();
+                if (string.IsNullOrWhiteSpace(productId)
+                    || !productId.StartsWith("gid://shopify/Product/", StringComparison.Ordinal))
+                    throw new ApplicationException("Shopify paginated shipping audit returned an invalid product.");
+                result.ProductGids.Add(productId);
+                if (kind == "selections")
+                {
+                    JsonElement variantIds = item.GetProperty("variantIds");
+                    List<string>? selectedVariants = null;
+                    if (variantIds.ValueKind == JsonValueKind.Array)
+                    {
+                        selectedVariants = new List<string>();
+                        foreach (JsonElement variant in variantIds.EnumerateArray())
+                        {
+                            string? variantGid = variant.GetString();
+                            if (string.IsNullOrWhiteSpace(variantGid) ||
+                                !variantGid.StartsWith("gid://shopify/ProductVariant/", StringComparison.Ordinal))
+                                throw new ApplicationException("Shopify selection has an invalid variant GID.");
+                            selectedVariants.Add(variantGid);
+                        }
+                    }
+                    else if (variantIds.ValueKind != JsonValueKind.Null)
+                        throw new ApplicationException("Shopify selection has an unexpected variant list.");
+
+                    result.Selections.Add(new ShopifyShippingSelectedVariant
+                    {
+                        ProductGid = productId,
+                        VariantGids = selectedVariants
+                    });
+                }
+            }
+
+            if (result.HasNextPage && string.IsNullOrWhiteSpace(result.EndCursor))
+                throw new ApplicationException("Shopify returned incomplete pagination data.");
+            return result;
+        }
+
+
         // Shopify does not allow a conditions source with zero selections
         // and zero conditions. If its last manual product is being reassigned,
         // unlink that one source from the collection instead. The collection
@@ -688,6 +899,24 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
 
         // Read-only capability probe for the 2026-07+ Markets shipping API.
         // This deliberately leaves the existing configured API version unchanged.
+        // Do not rely on appsettings.Development.json naming or hostname:
+        // query the actual store that accepted this app's Shopify credentials.
+        public async Task<string> GetConnectedShopDomainAsync()
+        {
+            const string query = @"query SiteShopIdentity { shop { myshopifyDomain } }";
+            using JsonDocument doc = await SendGraphQlAsync(query, null, "2026-07");
+            JsonElement root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Shopify store identity lookup failed: {errors}");
+
+            string? domain = root.GetProperty("data").GetProperty("shop")
+                .GetProperty("myshopifyDomain").GetString();
+            if (string.IsNullOrWhiteSpace(domain) ||
+                !domain.Trim().EndsWith(".myshopify.com", StringComparison.OrdinalIgnoreCase))
+                throw new ApplicationException("Shopify returned an invalid store identity.");
+            return domain.Trim().ToLowerInvariant();
+        }
+
         public async Task<bool> UsesMarketDrivenShippingAsync()
         {
             const string query = @"
@@ -1079,6 +1308,54 @@ query SiteShippingCollectionProductMembership($id: ID!, $after: String) {
                 after = next;
             }
             throw new ApplicationException("Shopify collection too large to certify membership safely.");
+        }
+
+        // Migration-only: changes Shopify tags, NOT title, description, quantity or publication.
+        public async Task<bool> SyncOnlyShippingClassTagForPartAsync(Part part)
+        {
+            if (part?.ShopifyProductId.HasValue != true || part.ShippingPolicy == null)
+                throw new InvalidOperationException("Part must have a valid Shopify product and SQL shipping policy.");
+
+            string gid = $"gid://shopify/Product/{part.ShopifyProductId.Value}";
+            string[] before = await GetProductTagsAsync(gid);
+            string? desired = part.ShippingPolicy.AllowsOnlineCheckout
+                ? $"ShippingClass_{part.ShippingPolicy.Id}" : null;
+
+            string[] existingShipping = before
+                .Where(x => x.StartsWith("ShippingClass_", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (existingShipping.Any(x => !string.Equals(x, desired, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException(
+                    "Conflicting Shopify shipping-class tag; requires human review.");
+
+            // Conflicting classes are rejected above. The migration only needs
+            // to ADD a missing tag; do not replace the Shopify product tag list.
+            // tagsAdd is additive, preserving all unrelated tags even if other
+            // Shopify integrations write them concurrently.
+            if (desired == null || existingShipping.Length != 0)
+                return false;
+
+            const string mutation = @"
+mutation BackfillOnlyShippingClassTag($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) {
+    node { id }
+    userErrors { field message }
+  }
+}";
+            using JsonDocument doc = await SendGraphQlAsync(mutation,
+                new { id = gid, tags = new[] { desired } });
+            var root = doc.RootElement;
+            if (root.TryGetProperty("errors", out JsonElement errors))
+                throw new ApplicationException($"Tag-only update failed: {errors}");
+            var payload = root.GetProperty("data").GetProperty("tagsAdd");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Shipping-class backfill failed");
+
+            string[] verified = await GetProductTagsAsync(gid);
+            if (verified.Count(x => string.Equals(x, desired,
+                    StringComparison.OrdinalIgnoreCase)) != 1 ||
+                before.Any(t => !verified.Contains(t, StringComparer.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("Tag-only update did not verify.");
+            return true;
         }
 
         public async Task SyncProductTagsForPartAsync(Part part)
