@@ -20,3 +20,5 @@ jobs:
         run: dotnet restore Site_2024/Site_2024.Web.Api.csproj
       - name: Compile .NET API (no Azure deployment)
         run: dotnet build Site_2024/Site_2024.Web.Api.csproj --configuration Release --no-restore
+      - name: Run no-network Shopify DEV target isolation tests
+        run: dotnet run --project tests/DevShopifyIsolation.Tests/DevShopifyIsolation.Tests.csproj --configuration Release
