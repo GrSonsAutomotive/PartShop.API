@@ -18,6 +18,7 @@ namespace Site_2024.Web.Api.Controllers
     {
         private readonly IPartService _service;
         private readonly IPartImageService _partImageService;
+        private readonly IAvailableService _availableService;
         private readonly ILocationService _locationService;
         private readonly IShopifyPartSyncService _shopifyPartSyncService;
         private readonly IShopifyAdminService _shopifyAdminService;
@@ -30,6 +31,7 @@ namespace Site_2024.Web.Api.Controllers
         public PartsApiController(
             IPartService service,
             IPartImageService partImageService,
+            IAvailableService availableService,
             ILocationService locationService,
             IShopifyPartSyncService shopifyPartSyncService,
             IShopifyAdminService shopifyAdminService,
@@ -43,6 +45,7 @@ namespace Site_2024.Web.Api.Controllers
         {
             _service = service;
             _partImageService = partImageService;
+            _availableService = availableService;
             _locationService = locationService;
             _shopifyPartSyncService = shopifyPartSyncService;
             _shopifyAdminService = shopifyAdminService;
@@ -222,6 +225,22 @@ namespace Site_2024.Web.Api.Controllers
                     return StatusCode(code, response);
                 }
 
+                // A Pending part must not become sellable without local stock and photos.
+                // A separate admin preview is advisory; validate again at publish time.
+                if (string.Equals(part.Available?.Status?.Trim(),
+                    "Pending", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (part.Quantity < 1)
+                        return Conflict(new ErrorResponse(
+                            "Part has no stock. Update its quantity before publishing."));
+
+                    List<PartImage> savedPhotos = _partImageService.GetByPartId(id);
+                    if (!(savedPhotos?.Any(img => !string.IsNullOrWhiteSpace(img.Url)) == true)
+                        && string.IsNullOrWhiteSpace(part.Image))
+                        return Conflict(new ErrorResponse(
+                            "Part has no saved photos. Upload at least one image before publishing."));
+                }
+
                 // Ensure the selected Site_2024 shipping tier is assigned before publishing.
                 await _shopifyPartSyncService.SyncShippingProfileForPartAsync(id);
 
@@ -241,6 +260,22 @@ namespace Site_2024.Web.Api.Controllers
                 publishResult.ImagesRequested = mediaResult.ImagesRequested;
                 publishResult.ImagesAdded = mediaResult.ImagesAdded;
                 publishResult.ImagesSkipped = mediaResult.ImagesSkipped;
+
+                // Keep Pending inventory hidden until Shopify confirms Online Store publication.
+                if (publishResult.PublishedToOnlineStore &&
+                    string.Equals(publishResult.Status, "ACTIVE", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(part.Available?.Status?.Trim(),
+                        "Pending", StringComparison.OrdinalIgnoreCase))
+                {
+                    Available? available = (_availableService.GetAll() ?? new())
+                        .FirstOrDefault(a => string.Equals(a.Status?.Trim(),
+                            "Available", StringComparison.OrdinalIgnoreCase));
+                    if (available == null)
+                        throw new InvalidOperationException(
+                            "Shopify published successfully, but SQL has no Available inventory status.");
+
+                    _service.PatchPart(id, new PartPatchRequest { AvailableId = available.Id }, user.Id);
+                }
 
                 response = new ItemResponse<ShopifyProductPublishResult>
                 {
