@@ -1,0 +1,22 @@
+name: Validate DEV parity API (BUILD ONLY)
+on:
+  push:
+    branches: [chore/dev-production-parity-20261110]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Assert isolated DEV Shopify target guard exists
+        run: |
+          grep -q 'gr-sons-shipping-dev.myshopify.com' Site_2024/Services/ShopifyTokenService.cs
+          grep -q 'DEV Shopify checkout is disabled' Site_2024/Services/ShopifyCheckoutService.cs
+      - name: Restore .NET API
+        run: dotnet restore Site_2024/Site_2024.Web.Api.csproj
+      - name: Compile .NET API (no Azure deployment)
+        run: dotnet build Site_2024/Site_2024.Web.Api.csproj --configuration Release --no-restore
