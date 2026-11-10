@@ -10,10 +10,15 @@ namespace Site_2024.Web.Api.Services
         Task<List<ShopifyLocationResult>> GetLocationsAsync();
         Task<List<ShopifyDeliveryProfileResult>> GetDeliveryProfilesAsync();
         Task<bool> UsesMarketDrivenShippingAsync();
+        Task<string> GetConnectedShopDomainAsync();
         Task<ShopifyCollectionCreateResult> CreateAutomatedShippingCollectionAsync(ShippingPolicy policy);
         Task<ShopifyShippingCollectionPage> GetShippingCollectionsAsync(string? after);
         Task<ShopifyShippingCollectionInfo?> GetShippingCollectionAsync(string collectionGid);
         Task<ShopifyShippingMembershipAudit?> AuditShippingCollectionMembershipAsync(string collectionGid);
+        Task<Dictionary<string, string?>> GetSoleProductVariantsAsync(
+            IReadOnlyList<string> productGids);
+        Task<ShopifyShippingMembershipPage?> GetShippingMembershipPageAsync(
+            string collectionGid, string? sourceGid, string kind, string? after);
         Task<ShopifyCollectionSourceCreateResult> AddShippingTagSourceAsync(string collectionGid, string shippingClassTag);
         Task<ShopifyShippingManualSelectionMutationResult> RemoveManualProductSelectionAsync(
             string collectionGid, string sourceGid, string productGid);
@@ -22,6 +27,7 @@ namespace Site_2024.Web.Api.Services
         Task AssignVariantToDeliveryProfileAsync(long variantId, long deliveryProfileId);
         Task<ShopifyProductInventorySyncResult> SyncProductDetailsForPartAsync(Part part);
         Task SyncProductTagsForPartAsync(Part part);
+        Task<bool> SyncOnlyShippingClassTagForPartAsync(Part part);
         Task<ShopifyProductShippingSnapshot> GetProductShippingSnapshotAsync(long productId);
         Task<bool> CollectionContainsProductAsync(string collectionGid, string productGid);
         Task<ShopifyProductMediaSyncResult> SyncProductImagesAsync(Part part, IReadOnlyCollection<PartImage> images);

@@ -106,11 +106,19 @@ namespace Site_2024.Web.Api.Controllers
         }
 
         [HttpPost("{id:int}/shopify-collection")]
-        [Authorize(Policy = "AdminAction")]
+        [Authorize(Policy = "PartsDelete")]
         public async Task<ActionResult<ItemResponse<ShopifyCollectionCreateResult>>> CreateShippingCollection(
             int id,
-            [FromServices] IShopifyAdminService shopifyAdminService)
+            [FromServices] IShopifyAdminService shopifyAdminService,
+            [FromServices] Microsoft.Extensions.Options.IOptions<ShopifySettings> shopifyOptions)
         {
+            // Creating checkout shipping collections is a Shopify write.
+            // Never allow it during the production pre-upgrade deployment.
+            if (!shopifyOptions.Value.AllowMarketDrivenShippingCollectionSourceWrites ||
+                !shopifyOptions.Value.IsAsyncShippingStoreAuthorized())
+                return Conflict(new ErrorResponse(
+                    "Shopify shipping collection creation is disabled for this environment."));
+
             ShippingPolicy? policy = _service.GetAll().FirstOrDefault(item => item.Id == id);
             if (policy == null)
                 return NotFound(new ErrorResponse("Active shipping policy was not found."));
@@ -220,6 +228,42 @@ namespace Site_2024.Web.Api.Controllers
             {
                 Logger.LogError(ex, "Failed read-only membership audit for Shopify collection.");
                 return StatusCode(502, new ErrorResponse("Unable to audit Shopify collection membership."));
+            }
+        }
+
+        // Read-only, one-connection-at-a-time pagination for complete shipping
+        // membership reconciliation. No Shopify or SQL writes.
+        // Client must exhaust each independent cursor before comparing sets.
+        [HttpGet("shopify/collection-membership-page")]
+        [Authorize(Policy = "AdminAction")]
+        public async Task<ActionResult<ItemResponse<ShopifyShippingMembershipPage>>> GetCollectionMembershipPage(
+            [FromQuery] string collectionGid,
+            [FromQuery] string kind,
+            [FromQuery] string? sourceGid,
+            [FromQuery] string? after,
+            [FromServices] IShopifyAdminService shopifyAdminService)
+        {
+            if (string.IsNullOrWhiteSpace(collectionGid)
+                || string.IsNullOrWhiteSpace(kind))
+                return BadRequest(new ErrorResponse("CollectionGid and kind are required."));
+            try
+            {
+                ShopifyShippingMembershipPage? page =
+                    await shopifyAdminService.GetShippingMembershipPageAsync(
+                        collectionGid, sourceGid, kind.Trim().ToLowerInvariant(), after);
+                if (page == null)
+                    return NotFound(new ErrorResponse("Collection or source not found in Shopify."));
+                return Ok(new ItemResponse<ShopifyShippingMembershipPage> { Item = page });
+            }
+            catch (ArgumentException ex)
+            {
+                return BadRequest(new ErrorResponse(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Unable to page Shopify shipping collection membership.");
+                return StatusCode(502, new ErrorResponse(
+                    "Unable to retrieve complete Shopify shipping membership page."));
             }
         }
 

@@ -28,6 +28,40 @@ namespace Site_2024.Web.Api.Models
         public bool AllowMarketDrivenShippingAsyncReassignmentWrites { get; set; } = false;
         // Background processing runs independently of browser/session and queue gate.
         public bool EnableMarketDrivenShippingAsyncWorker { get; set; } = false;
+        // Shipping jobs are locked to the DEV store unless an explicit production
+        // store match AND a separate production release flag have been configured.
+        // These are independent of the queue/worker/publishing feature flags.
+        public string AsyncShippingAuthorizedShopDomain { get; set; } =
+            "gr-sons-shipping-dev.myshopify.com";
+        public bool AllowProductionAsyncShipping { get; set; } = false;
+
+        // An entirely separate, OFF-by-default permission for the catalog tag migration.
+        public bool AllowMarketDrivenShippingTagBackfillWrites { get; set; } = false;
+        public bool AllowProductionShippingTagBackfill { get; set; } = false;
+        public string ShippingTagBackfillAuthorizedShopDomain { get; set; } =
+            "gr-sons-shipping-dev.myshopify.com";
+
+        public bool IsShippingTagBackfillStoreAuthorized() =>
+            !string.IsNullOrWhiteSpace(ShopDomain) &&
+            string.Equals(ShopDomain.Trim(), ShippingTagBackfillAuthorizedShopDomain.Trim(),
+                StringComparison.OrdinalIgnoreCase) &&
+            (string.Equals(ShopDomain.Trim(), "gr-sons-shipping-dev.myshopify.com",
+                StringComparison.OrdinalIgnoreCase) || AllowProductionShippingTagBackfill);
+
+        public bool IsAsyncShippingStoreAuthorized()
+        {
+            const string devStore = "gr-sons-shipping-dev.myshopify.com";
+            if (string.IsNullOrWhiteSpace(ShopDomain) ||
+                string.IsNullOrWhiteSpace(AsyncShippingAuthorizedShopDomain) ||
+                !string.Equals(ShopDomain.Trim(),
+                    AsyncShippingAuthorizedShopDomain.Trim(),
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return string.Equals(ShopDomain.Trim(), devStore,
+                       StringComparison.OrdinalIgnoreCase)
+                || AllowProductionAsyncShipping;
+        }
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";
