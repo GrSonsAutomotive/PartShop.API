@@ -38,6 +38,13 @@ namespace Site_2024.Web.Api.Services
             string shopBaseUrl =
                 NormalizeShopDomain(_shopifySettings.ShopDomain);
 
+            // DEV checkout must never direct customers to the production store.
+            if (!string.Equals(shopBaseUrl,
+                "https://gr-sons-shipping-dev.myshopify.com",
+                StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "DEV Shopify checkout is disabled: the configured store is not the isolated DEV shop.");
+
             List<ShopifyCheckoutLineItemResult> lineItems = new();
             List<string> errors = new();
 
