@@ -28,6 +28,14 @@ namespace Site_2024.Web.Api.Services
 
         public async Task<string> GetAccessTokenAsync()
         {
+            // DEV PARITY SAFETY: All Shopify Admin API clients use this token.
+            // Fail closed before returning a cached token or making any HTTP call.
+            const string expectedDevStore = "gr-sons-shipping-dev.myshopify.com";
+            string configuredShop = NormalizeShopDomain(_settings.ShopDomain ?? string.Empty);
+            if (!string.Equals(configuredShop, expectedDevStore, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "DEV Shopify isolation blocked this request: the configured Shopify store " +
+                    "is not the isolated development store. No Shopify call was made.");
             if (!string.IsNullOrWhiteSpace(_cachedAccessToken)
                 && DateTime.UtcNow < _expiresAtUtc.AddMinutes(-5))
             {
