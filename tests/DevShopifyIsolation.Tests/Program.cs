@@ -49,7 +49,8 @@ foreach (string shop in forbiddenShops)
         });
     }
     catch (InvalidOperationException e)
-        when (e.Message.Contains("DEV Shopify checkout is disabled"))
+        when (e.Message.Contains("DEV Shopify checkout is disabled") ||
+              e.Message.Contains("Shopify shop domain is missing"))
     {
         checkoutBlocked = true;
     }
