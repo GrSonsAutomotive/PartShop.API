@@ -31,8 +31,13 @@ still target the DEV deployment (not the production workflow).
 `gr-sons-shipping-dev.myshopify.com`, and the Shopify credentials, publication
 GID and location GID must belong to that DEV store. Never copy production
 `ClientId`, `ClientSecret`, store-specific IDs, or other settings into DEV.
-The checked-in Development fallback has credentials/location IDs blanked; supply
-DEV-only secrets and IDs through secure Azure App Service settings.
+The checked-in `appsettings.Development.json` file is preserved exactly as
+it exists on the original DEV branch, including its historical credentials and
+fallback domain. Azure App Service Shopify settings override these values at
+runtime; the user confirms the Azure DEV domain is
+`gr-sons-shipping-dev.myshopify.com`. If an override disappears, the DEV-only
+Shopify token guard refuses requests to any other shop. Do not change the
+existing working Azure DEV credentials as part of this parity rollout.
 
 **Fail closed:** `ShopifyTokenService` refuses to obtain or return any access token
 unless the configured shop is the isolated DEV shop. `ShopifyCheckoutService`
@@ -53,9 +58,9 @@ production-only `Site_2024` migrations against DEV or vice versa.
    before applying it. Do not automatically enable async worker feature flags.
 3. Verify relevant shipping policies have DEV-store collection mappings.
    A valid production collection GID is not valid for DEV.
-4. With AdminHigh authorization, check the DEV-only
-   `GET /api/shipping-migration/legacy/shop-identity` response and require
-   `isolatedDevStoreVerified = true`.
+4. User confirmed DEV Azure Shopify configuration targets
+   `gr-sons-shipping-dev.myshopify.com`. Independent live identity check is
+   optional for this rollout at the user's request; no live check was run.
 5. Keep mutation/rehearsal gates off unless explicitly testing the isolated
    DEV store with disposable test products.
 
@@ -75,6 +80,5 @@ production-only `Site_2024` migrations against DEV or vice versa.
 
 ## Release gate
 Build-only CI passing is necessary but not sufficient. Do **not** merge the
-parity branches into `dev` before checking the live Azure App Service
-Shopify environment, the DEV database preflight, and the manual Shopify
-identity result. A GitHub branch check cannot read those Azure settings.
+parity branches into `dev` before reviewing the user-confirmed Azure DEV Shopify configuration and
+DEV database preflight. Keep the application-level Shopify isolation guard. A GitHub branch check cannot read those Azure settings.
