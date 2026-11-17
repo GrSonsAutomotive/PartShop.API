@@ -182,6 +182,16 @@ SELECT @r;", connection);
             if (part?.ProductId is not long productId || productId <= 0)
                 return new(false, "Part no longer has a valid Shopify product link.");
 
+            // Verify product status and exact ownership BEFORE locking the
+            // local listing. This avoids stranding a prepared operation when
+            // an operator has not yet unpublished the Shopify product.
+            if (part.OperationState != "ShopifyDeleted")
+            {
+                var firstSnapshot = await _shopify.GetCleanupProductSnapshotAsync(productId);
+                string? firstMismatch = GetMismatch(firstSnapshot, partId, productId);
+                if (firstMismatch != null) return new(false, firstMismatch);
+            }
+
             // All local eligibility rules are rechecked under a SQL UPDLOCK
             // before persisting the operation, and again during finalization.
             await ExecAsync(connection, "dbo.InventoryCleanupShopify_Begin",
@@ -195,9 +205,27 @@ SELECT @r;", connection);
                 return new(true, "Shopify deletion was previously confirmed; local cleanup completed.");
             }
 
-            ShopifyCleanupProductSnapshot snapshot = await _shopify.GetCleanupProductSnapshotAsync(productId);
-            string? mismatch = GetMismatch(snapshot, partId, productId);
-            if (mismatch != null) return new(false, mismatch);
+            ShopifyCleanupProductSnapshot snapshot;
+            try
+            {
+                snapshot = await _shopify.GetCleanupProductSnapshotAsync(productId);
+                string? mismatch = GetMismatch(snapshot, partId, productId);
+                if (mismatch != null)
+                {
+                    if (part?.OperationState == "Prepared")
+                        await ExecAsync(connection, "dbo.InventoryCleanupShopify_CancelPrepared",
+                            partId, productId, actual);
+                    return new(false, mismatch);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (part?.OperationState == "Prepared")
+                    await ExecAsync(connection, "dbo.InventoryCleanupShopify_CancelPrepared",
+                        partId, productId, actual);
+                _logger.LogWarning(ex, "Shopify preflight lookup failed for PartId {PartId}", partId);
+                return new(false, "Unable to verify Shopify product. No Shopify deletion was attempted.");
+            }
 
             try
             {
