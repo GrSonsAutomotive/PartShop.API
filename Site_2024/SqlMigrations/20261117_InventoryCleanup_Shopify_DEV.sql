@@ -10,7 +10,7 @@ BEGIN
         PartId int NOT NULL,
         ShopifyProductId bigint NOT NULL,
         ShopDomain nvarchar(255) NOT NULL,
-        State nvarchar(32) NOT NULL, -- Prepared, Attempted, ShopifyDeleted, Completed
+        State nvarchar(32) NOT NULL, -- Prepared, Attempted, ShopifyDeleted, Completed, Cancelled
         RequestedByUserId int NOT NULL,
         CreatedAtUtc datetime2(0) NOT NULL CONSTRAINT DF_InventoryCleanupShopifyOperations_Created DEFAULT SYSUTCDATETIME(),
         UpdatedAtUtc datetime2(0) NOT NULL CONSTRAINT DF_InventoryCleanupShopifyOperations_Updated DEFAULT SYSUTCDATETIME(),
@@ -21,7 +21,7 @@ BEGIN
         LastError nvarchar(2000) NULL,
         CONSTRAINT UQ_InventoryCleanupShopifyOperations_PartId UNIQUE (PartId),
         CONSTRAINT CK_InventoryCleanupShopifyOperations_State
-          CHECK (State IN (N'Prepared',N'Attempted',N'ShopifyDeleted',N'Completed'))
+          CHECK (State IN (N'Prepared',N'Attempted',N'ShopifyDeleted',N'Completed',N'Cancelled'))
     );
 END;
 GO
@@ -96,7 +96,17 @@ BEGIN
 
       IF EXISTS(SELECT 1 FROM dbo.InventoryCleanupShopifyOperations WHERE PartId=@PartId)
       BEGIN
-         IF NOT EXISTS(SELECT 1 FROM dbo.InventoryCleanupShopifyOperations
+         IF EXISTS(SELECT 1 FROM dbo.InventoryCleanupShopifyOperations
+                       WHERE PartId=@PartId AND State=N'Cancelled')
+         BEGIN
+            UPDATE dbo.InventoryCleanupShopifyOperations
+            SET ShopifyProductId=@ShopifyProductId, ShopDomain=@ShopDomain,
+                RequestedByUserId=@UserId, State=N'Prepared',
+                AttemptCount=0, LastAttemptAtUtc=NULL, ShopifyDeletedAtUtc=NULL,
+                LocalDeletedAtUtc=NULL, LastError=NULL, UpdatedAtUtc=SYSUTCDATETIME()
+            WHERE PartId=@PartId;
+         END
+         ELSE IF NOT EXISTS(SELECT 1 FROM dbo.InventoryCleanupShopifyOperations
                        WHERE PartId=@PartId AND ShopifyProductId=@ShopifyProductId
                          AND ShopDomain=@ShopDomain
                          AND State IN (N'Prepared',N'Attempted',N'ShopifyDeleted'))
@@ -116,6 +126,20 @@ BEGIN
     END CATCH
     SELECT Id, PartId, ShopifyProductId, ShopDomain, State, AttemptCount
     FROM dbo.InventoryCleanupShopifyOperations WHERE PartId=@PartId;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE dbo.InventoryCleanupShopify_CancelPrepared
+    @PartId int, @ShopDomain nvarchar(255), @ShopifyProductId bigint
+AS
+BEGIN
+    SET NOCOUNT ON;
+    -- Safe only if NO mutation attempt has ever started.
+    UPDATE dbo.InventoryCleanupShopifyOperations
+    SET State=N'Cancelled', UpdatedAtUtc=SYSUTCDATETIME()
+    WHERE PartId=@PartId AND ShopDomain=@ShopDomain
+      AND ShopifyProductId=@ShopifyProductId AND State=N'Prepared'
+      AND AttemptCount=0;
 END;
 GO
 
