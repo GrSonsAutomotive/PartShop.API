@@ -150,6 +150,7 @@ builder.Services.AddScoped<ReferenceDeletionService>();
 
 builder.Services.AddScoped<ReferenceDeletionService>();
 builder.Services.AddScoped<IPartService, PartService>();
+builder.Services.AddScoped<InventoryCleanupShopifyCoordinator>();
 builder.Services.AddScoped<IPartImageService, PartImageService>();
 builder.Services.AddScoped<IAvailableService, AvailableService>();
 builder.Services.AddScoped<IModelService, ModelService>();
