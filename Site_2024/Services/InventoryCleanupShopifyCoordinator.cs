@@ -99,7 +99,7 @@ WHERE p.id=@PartId;", connection);
         PartLink? part = await ReadLinkAsync(connection, partId);
         if (part?.ProductId is not long id || id <= 0)
             return new(false, "Part lacks a valid Shopify product link.", null, actual, null, null);
-        if (part.OperationState != null &&
+        if (part.OperationState != null && part.OperationState != "Cancelled" &&
             (part.OperationProductId != id ||
              !string.Equals(part.OperationShopDomain, actual, StringComparison.OrdinalIgnoreCase)))
             return new(false, "Existing operation belongs to a different product/store. Manual reconciliation required.",
