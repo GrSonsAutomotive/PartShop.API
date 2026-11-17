@@ -73,7 +73,7 @@ BEGIN
                    FROM dbo.PartSales WHERE PartId=p.id) ps
       WHERE p.id=@PartId;
 
-      IF @found=0 OR @product<>@ShopifyProductId
+      IF @found=0 OR @product IS NULL OR @product<>@ShopifyProductId
          THROW 51103, 'Part missing or Shopify product linkage changed.', 1;
       IF LOWER(LTRIM(RTRIM(@status)))<>N'unavailable'
          THROW 51104, 'Part must be unavailable.', 1;
