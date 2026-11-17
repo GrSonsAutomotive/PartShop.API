@@ -3,6 +3,33 @@
 -- Never run against production until DEV validation and approval.
 SET XACT_ABORT ON;
 GO
+-- Record the actual transition into Unavailable (legacy rows use last modification as
+-- a conservative fallback; no earlier unavailable date can be proven).
+IF COL_LENGTH(N'dbo.Parts', N'UnavailableSinceUtc') IS NULL
+  ALTER TABLE dbo.Parts ADD UnavailableSinceUtc datetime2(0) NULL;
+GO
+UPDATE p SET UnavailableSinceUtc=CONVERT(datetime2(0),p.datemodified)
+FROM dbo.Parts p JOIN dbo.Available a ON a.id=p.availableId
+WHERE LOWER(LTRIM(RTRIM(a.status)))=N'unavailable'
+  AND p.UnavailableSinceUtc IS NULL;
+GO
+CREATE OR ALTER TRIGGER dbo.Parts_SetUnavailableSince
+ON dbo.Parts AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF NOT UPDATE(availableId) RETURN;
+    UPDATE p
+       SET UnavailableSinceUtc=CASE
+           WHEN LOWER(LTRIM(RTRIM(a.status)))=N'unavailable' THEN SYSUTCDATETIME()
+           ELSE NULL END
+    FROM dbo.Parts p
+      JOIN inserted i ON i.id=p.id
+      LEFT JOIN deleted d ON d.id=i.id
+      JOIN dbo.Available a ON a.id=i.availableId
+    WHERE d.id IS NULL OR d.availableId<>i.availableId;
+END;
+GO
 IF OBJECT_ID(N'dbo.InventoryCleanupDeletedParts', N'U') IS NULL
 BEGIN
   CREATE TABLE dbo.InventoryCleanupDeletedParts
@@ -67,13 +94,13 @@ BEGIN
         SET @MinimumAgeDays = 90;
 
     DECLARE @PartName nvarchar(128), @PartSnapshot nvarchar(max),
-            @Status nvarchar(128), @LastModified datetime,
+            @Status nvarchar(128), @UnavailableSinceUtc datetime2(0),
             @ProductId bigint, @VariantId bigint, @InventoryId bigint,
             @AuditRowCount int, @PhotoQueueCount int;
 
     BEGIN TRY
         BEGIN TRANSACTION;
-        SELECT @PartName=p.name, @LastModified=p.datemodified,
+        SELECT @PartName=p.name, @UnavailableSinceUtc=p.UnavailableSinceUtc,
                @ProductId=p.ShopifyProductId, @VariantId=p.ShopifyVariantId,
                @InventoryId=p.ShopifyInventoryItemId, @Status=a.status
         FROM dbo.Parts p WITH (UPDLOCK, HOLDLOCK)
@@ -84,8 +111,8 @@ BEGIN
             THROW 51002, 'Part no longer exists.', 1;
         IF LOWER(LTRIM(RTRIM(@Status))) <> N'unavailable'
             THROW 51003, 'Only unavailable parts may be permanently deleted.', 1;
-        IF @LastModified IS NULL OR @LastModified > DATEADD(DAY, -@MinimumAgeDays, SYSUTCDATETIME())
-            THROW 51004, 'Part has not satisfied the minimum age based on its last modification.', 1;
+        IF @UnavailableSinceUtc IS NULL OR @UnavailableSinceUtc > DATEADD(DAY, -@MinimumAgeDays, SYSUTCDATETIME())
+            THROW 51004, 'Part has not satisfied the minimum unavailable age.', 1;
         IF @ProductId IS NOT NULL OR @VariantId IS NOT NULL OR @InventoryId IS NOT NULL
             THROW 51005, 'A Shopify link remains; coordinated Shopify deletion is required.', 1;
 
