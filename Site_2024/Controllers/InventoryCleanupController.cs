@@ -245,7 +245,8 @@ WHERE p.id=@PartId;";
             await connection.OpenAsync();
             string sql = @"SELECT TOP (100) Id, Url FROM dbo.InventoryCleanupPhotoQueue
 WHERE Status IN (N'Pending',N'Failed')
-  AND (@PartId IS NULL OR PartId=@PartId) ORDER BY Id";
+  AND (@PartId IS NULL OR PartId=@PartId)
+ORDER BY CASE WHEN Status=N'Pending' THEN 0 ELSE 1 END, Id";
             await using var cmd = new SqlCommand(sql, connection);
             cmd.Parameters.Add("@PartId", SqlDbType.Int).Value = (object?)partId ?? DBNull.Value;
             await using var reader = await cmd.ExecuteReaderAsync();
@@ -299,6 +300,16 @@ WHERE Id=@Id AND Status IN (N'Pending',N'Failed')", connection);
             update.Parameters.Add("@Status", SqlDbType.NVarChar, 20).Value = status;
             update.Parameters.Add("@Error", SqlDbType.NVarChar, 2000).Value = (object?)error ?? DBNull.Value;
             await update.ExecuteNonQueryAsync();
+        }
+        // Include files not yet attempted plus failures and manual-review items.
+        await using (var connection = new SqlConnection(_connectionString))
+        {
+            await connection.OpenAsync();
+            await using var count = new SqlCommand(@"SELECT COUNT(1)
+FROM dbo.InventoryCleanupPhotoQueue
+WHERE Status<>N'Deleted' AND (@PartId IS NULL OR PartId=@PartId)", connection);
+            count.Parameters.Add("@PartId", SqlDbType.Int).Value = (object?)partId ?? DBNull.Value;
+            pending = Convert.ToInt32(await count.ExecuteScalarAsync());
         }
         return (deleted, pending);
     }
