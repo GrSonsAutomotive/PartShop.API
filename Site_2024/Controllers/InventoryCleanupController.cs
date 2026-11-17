@@ -68,11 +68,12 @@ SELECT p.id, p.name, p.partnumber, p.datemodified,
                    OR p.ShopifyInventoryItemId IS NOT NULL THEN CAST(1 AS bit)
             ELSE CAST(0 AS bit) END AS ShopifyLinked,
        COUNT(1) OVER() AS TotalCount,
-       DATEDIFF(DAY, p.datemodified, SYSUTCDATETIME()) AS DaysSinceModified
+       DATEDIFF(DAY, p.datemodified, SYSUTCDATETIME()) AS DaysSinceModified,
+       p.UnavailableSinceUtc, DATEDIFF(DAY, p.UnavailableSinceUtc, SYSUTCDATETIME()) AS DaysUnavailable
 FROM dbo.Parts p
 JOIN dbo.Available a ON a.id=p.availableId
 WHERE LOWER(LTRIM(RTRIM(a.status)))=N'unavailable'
-  AND p.datemodified<=DATEADD(DAY,-@OlderThanDays,SYSUTCDATETIME())
+  AND p.UnavailableSinceUtc<=DATEADD(DAY,-@OlderThanDays,SYSUTCDATETIME())
   AND (@Query=N'' OR p.name LIKE N'%'+@Query+N'%'
                      OR p.partnumber LIKE N'%'+@Query+N'%'
                      OR CONVERT(nvarchar(20),p.id)=@Query)
@@ -83,7 +84,7 @@ OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;";
         var count = 0;
         await using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
-        await using var command = new SqlCommand(sql.Replace("SYSUTCDATETIME()", "SYSUTCDATETIME()"), connection);
+        await using var command = new SqlCommand(sql, connection);
         command.Parameters.Add("@OlderThanDays", SqlDbType.Int).Value = olderThanDays;
         command.Parameters.Add("@Offset", SqlDbType.Int).Value = pageIndex * pageSize;
         command.Parameters.Add("@PageSize", SqlDbType.Int).Value = pageSize;
@@ -99,7 +100,9 @@ OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;";
                 lastModified = reader.GetDateTime(3),
                 photoCount = reader.GetInt32(4),
                 shopifyLinked = reader.GetBoolean(5),
-                daysSinceModified = reader.GetInt32(7)
+                daysSinceModified = reader.GetInt32(7),
+                unavailableSince = reader.IsDBNull(8) ? (DateTime?)null : reader.GetDateTime(8),
+                daysUnavailable = reader.IsDBNull(9) ? (int?)null : reader.GetInt32(9)
             });
         }
         return Ok(new { item = new { rows, totalCount = count, pageIndex, pageSize,
@@ -108,6 +111,7 @@ OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;";
 
     private async Task<(bool Found, bool CanDelete, string Reason,
                         DateTime LastModified, int DaysSinceModified,
+                        DateTime? UnavailableSince, int DaysUnavailable,
                         bool ShopifyLinked, bool HasHistory)> GetEligibilityAsync(int id)
     {
         const string sql = @"
@@ -124,7 +128,8 @@ SELECT p.datemodified, a.status,
       THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS HasHistory,
  CASE WHEN EXISTS (SELECT 1 FROM dbo.AdminDiscountCodes WHERE PartId=p.id)
       THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS HasDiscount,
- DATEDIFF(DAY,p.datemodified,SYSUTCDATETIME()) AS DaysSinceModified
+ DATEDIFF(DAY,p.datemodified,SYSUTCDATETIME()) AS DaysSinceModified,
+ p.UnavailableSinceUtc, DATEDIFF(DAY,p.UnavailableSinceUtc,SYSUTCDATETIME()) AS DaysUnavailable
 FROM dbo.Parts p JOIN dbo.Available a ON a.id=p.availableId
 WHERE p.id=@PartId;";
         await using var connection = new SqlConnection(_connectionString);
@@ -133,18 +138,20 @@ WHERE p.id=@PartId;";
         command.Parameters.Add("@PartId", SqlDbType.Int).Value = id;
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
-            return (false, false, "Part not found.", default, 0, false, false);
+            return (false, false, "Part not found.", default, 0, null, 0, false, false);
         var date = reader.GetDateTime(0);
         var status = reader.GetString(1);
         var linked = reader.GetBoolean(2);
         var history = reader.GetBoolean(3);
         var discount = reader.GetBoolean(4);
         var days = reader.GetInt32(5);
+        DateTime? unavailableSince = reader.IsDBNull(6) ? null : reader.GetDateTime(6);
+        var daysUnavailable = reader.IsDBNull(7) ? 0 : reader.GetInt32(7);
 
         var reason = !string.Equals(status.Trim(), "Unavailable", StringComparison.OrdinalIgnoreCase)
             ? "Only unavailable parts can be deleted."
-            : date > DateTime.UtcNow.AddDays(-MinimumDeletionAgeDays)
-            ? $"Must remain unavailable/unchanged for at least {MinimumDeletionAgeDays} days."
+            : unavailableSince == null || unavailableSince > DateTime.UtcNow.AddDays(-MinimumDeletionAgeDays)
+            ? $"Must remain unavailable for at least {MinimumDeletionAgeDays} days."
             : history
             ? "Sales or return history exists. Preserve this listing for accounting and refunds."
             : discount
@@ -152,7 +159,7 @@ WHERE p.id=@PartId;";
             : linked
             ? "Shopify-linked part: coordinated Shopify deletion is not enabled yet."
             : "";
-        return (true, reason.Length == 0, reason, date, days, linked, history);
+        return (true, reason.Length == 0, reason, date, days, unavailableSince, daysUnavailable, linked, history);
     }
 
     [HttpGet("{id:int}/preview")]
@@ -164,7 +171,8 @@ WHERE p.id=@PartId;";
         if (_shippingSettings.AsyncShippingJobsSchemaReady && await _shippingJobs.HasOpenAsync(id))
             return Ok(new { item = new { partId = id, canDelete = false,
               reason = "A shipping update is pending or requires attention.",
-              item.LastModified, item.DaysSinceModified, item.ShopifyLinked, item.HasHistory,
+              item.LastModified, item.DaysSinceModified, item.UnavailableSince, item.DaysUnavailable,
+              item.ShopifyLinked, item.HasHistory,
               minimumDeletionAgeDays = MinimumDeletionAgeDays } });
         return Ok(new { item = new { partId = id, item.CanDelete, item.Reason,
           item.LastModified, item.DaysSinceModified, item.ShopifyLinked, item.HasHistory,
