@@ -917,6 +917,59 @@ mutation SiteAppendShippingTagSource($collection: CollectionUpdateInput!) {
             return domain.Trim().ToLowerInvariant();
         }
 
+        // Only caller: the independently gated, AdminHigh Inventory Cleanup flow.
+        public async Task<ShopifyCleanupProductSnapshot> GetCleanupProductSnapshotAsync(long productId)
+        {
+            if (productId <= 0) throw new ArgumentOutOfRangeException(nameof(productId));
+            const string query = @"
+query SiteInventoryCleanupProduct($id: ID!) {
+  product(id: $id) {
+    id
+    status
+    tags
+  }
+}";
+            string gid = $"gid://shopify/Product/{productId}";
+            using JsonDocument doc = await SendGraphQlAsync(query, new { id = gid });
+            var root = doc.RootElement;
+            if (root.TryGetProperty("errors", out var topErrors))
+                throw new ApplicationException($"Shopify product lookup failed: {topErrors}");
+            var product = root.GetProperty("data").GetProperty("product");
+            if (product.ValueKind == JsonValueKind.Null)
+                return new ShopifyCleanupProductSnapshot { Exists = false };
+            return new ShopifyCleanupProductSnapshot {
+                Exists = true,
+                ProductGid = product.GetProperty("id").GetString(),
+                Status = product.GetProperty("status").GetString(),
+                Tags = product.GetProperty("tags").EnumerateArray()
+                    .Select(x => x.GetString() ?? "").ToList()
+            };
+        }
+
+        public async Task DeleteProductForInventoryCleanupAsync(long productId)
+        {
+            if (productId <= 0) throw new ArgumentOutOfRangeException(nameof(productId));
+            const string mutation = @"
+mutation SiteInventoryCleanupDeleteProduct($input: ProductDeleteInput!) {
+  productDelete(input: $input, synchronous: true) {
+    deletedProductId
+    userErrors { field message }
+  }
+}";
+            string gid = $"gid://shopify/Product/{productId}";
+            using JsonDocument doc = await SendGraphQlAsync(mutation, new {
+                input = new { id = gid }
+            });
+            var root = doc.RootElement;
+            if (root.TryGetProperty("errors", out var errors))
+                throw new ApplicationException($"Shopify productDelete GraphQL failed: {errors}");
+            var payload = root.GetProperty("data").GetProperty("productDelete");
+            ThrowIfUserErrors(payload.GetProperty("userErrors"), "Inventory Cleanup productDelete failed");
+            string? deleted = payload.GetProperty("deletedProductId").GetString();
+            if (!string.Equals(deleted, gid, StringComparison.Ordinal))
+                throw new ApplicationException("Shopify did not confirm deletion of the expected product ID.");
+        }
+
         public async Task<bool> UsesMarketDrivenShippingAsync()
         {
             const string query = @"
