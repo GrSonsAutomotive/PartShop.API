@@ -62,6 +62,25 @@ namespace Site_2024.Web.Api.Models
                        StringComparison.OrdinalIgnoreCase)
                 || AllowProductionAsyncShipping;
         }
+        // Independent, OFF-by-default Shopify product deletion gate.
+        // DEV must use its isolated Shopify store. Production requires a separate opt-in.
+        public bool AllowInventoryCleanupShopifyDeleteWrites { get; set; } = false;
+        public string InventoryCleanupAuthorizedShopDomain { get; set; } =
+            "gr-sons-shipping-dev.myshopify.com";
+        public bool AllowProductionInventoryCleanupShopifyDeletes { get; set; } = false;
+
+        public bool IsInventoryCleanupShopAllowed(string actualShopDomain)
+        {
+            string configured = (ShopDomain ?? "").Trim().ToLowerInvariant();
+            string authorized = (InventoryCleanupAuthorizedShopDomain ?? "").Trim().ToLowerInvariant();
+            string actual = (actualShopDomain ?? "").Trim().ToLowerInvariant();
+            return AllowInventoryCleanupShopifyDeleteWrites
+                && configured.EndsWith(".myshopify.com", StringComparison.Ordinal)
+                && configured == authorized && actual == configured
+                && (actual == "gr-sons-shipping-dev.myshopify.com"
+                    || AllowProductionInventoryCleanupShopifyDeletes);
+        }
+
         public string RedirectUri { get; set; } = string.Empty;
         public string DefaultVendor { get; set; } = "GR&Sons";
         public string DefaultProductType { get; set; } = "Used Auto Part";

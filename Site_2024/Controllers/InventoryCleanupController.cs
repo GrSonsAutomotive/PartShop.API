@@ -11,8 +11,8 @@ using Site_2024.Web.Api.Services;
 
 namespace Site_2024.Web.Api.Controllers;
 
-// No stock is deleted from Shopify by this endpoint. Linked parts are deliberately
-// ineligible until a resumable cross-system Shopify cleanup workflow is installed.
+// AdminHigh entry point for both the existing local cleanup and the new
+// independently gated, resumable Shopify-linked cleanup.
 [ApiController]
 [Route("api/admin/inventory-cleanup")]
 [Authorize(Policy = "PartsDelete")]
@@ -26,6 +26,7 @@ public sealed class InventoryCleanupController : ControllerBase
     private readonly IAuthenticationService<IUserAuthData> _authentication;
     private readonly ShopifyShippingJobStore _shippingJobs;
     private readonly ShopifySettings _shippingSettings;
+    private readonly InventoryCleanupShopifyCoordinator _shopifyCleanup;
 
     public InventoryCleanupController(
         IConfiguration configuration,
@@ -33,7 +34,8 @@ public sealed class InventoryCleanupController : ControllerBase
         ILogger<InventoryCleanupController> logger,
         IAuthenticationService<IUserAuthData> authentication,
         ShopifyShippingJobStore shippingJobs,
-        IOptions<ShopifySettings> shippingSettings)
+        IOptions<ShopifySettings> shippingSettings,
+        InventoryCleanupShopifyCoordinator shopifyCleanup)
     {
         _configuration = configuration;
         _environment = environment;
@@ -41,6 +43,7 @@ public sealed class InventoryCleanupController : ControllerBase
         _authentication = authentication;
         _shippingJobs = shippingJobs;
         _shippingSettings = shippingSettings.Value;
+        _shopifyCleanup = shopifyCleanup;
         _connectionString = configuration.GetConnectionString("connMSSQL")
             ?? throw new InvalidOperationException("Missing connMSSQL database connection.");
     }
@@ -119,7 +122,8 @@ SELECT p.datemodified, a.status,
  CASE WHEN p.ShopifyProductId IS NOT NULL OR p.ShopifyVariantId IS NOT NULL
                 OR p.ShopifyInventoryItemId IS NOT NULL THEN CAST(1 AS bit)
       ELSE CAST(0 AS bit) END AS ShopifyLinked,
- CASE WHEN EXISTS(SELECT 1 FROM dbo.PartSales WHERE PartId=p.id)
+ CASE WHEN p.ShopifyOrderId IS NOT NULL OR p.SoldOnUtc IS NOT NULL
+        OR EXISTS(SELECT 1 FROM dbo.PartSales WHERE PartId=p.id)
         OR EXISTS(SELECT 1 FROM dbo.RefundRequests WHERE PartId=p.id)
         OR EXISTS(SELECT 1 FROM dbo.RefundRequestItems WHERE PartId=p.id)
         OR EXISTS(SELECT 1 FROM dbo.RefundFinalizationItems WHERE PartId=p.id)
@@ -156,8 +160,6 @@ WHERE p.id=@PartId;";
             ? "Sales or return history exists. Preserve this listing for accounting and refunds."
             : discount
             ? "A discount references this listing. Resolve the discount first."
-            : linked
-            ? "Shopify-linked part: coordinated Shopify deletion is not enabled yet."
             : "";
         return (true, reason.Length == 0, reason, date, days, unavailableSince, daysUnavailable, linked, history);
     }
@@ -168,16 +170,39 @@ WHERE p.id=@PartId;";
         if (id <= 0) return BadRequest(new { message = "Invalid part ID." });
         var item = await GetEligibilityAsync(id);
         if (!item.Found) return NotFound(new { message = item.Reason });
+
+        bool canDelete = item.CanDelete;
+        string reason = item.Reason;
+        InventoryCleanupShopifyCoordinator.PreviewResult? shopify = null;
         if (_shippingSettings.AsyncShippingJobsSchemaReady && await _shippingJobs.HasOpenAsync(id))
-            return Ok(new { item = new { partId = id, canDelete = false,
-              reason = "A shipping update is pending or requires attention.",
-              item.LastModified, item.DaysSinceModified, item.UnavailableSince, item.DaysUnavailable,
-              item.ShopifyLinked, item.HasHistory,
-              minimumDeletionAgeDays = MinimumDeletionAgeDays } });
-        return Ok(new { item = new { partId = id, item.CanDelete, item.Reason,
-          item.LastModified, item.DaysSinceModified, item.UnavailableSince, item.DaysUnavailable,
-          item.ShopifyLinked, item.HasHistory,
-          minimumDeletionAgeDays = MinimumDeletionAgeDays } });
+        {
+            canDelete = false;
+            reason = "A shipping update is pending or requires attention.";
+        }
+        else if (canDelete && item.ShopifyLinked)
+        {
+            try
+            {
+                shopify = await _shopifyCleanup.PreviewAsync(id);
+                canDelete = shopify.CanDelete;
+                reason = shopify.Reason;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Shopify cleanup preview failed for PartId {PartId}: {Type}",
+                    id, ex.GetType().Name);
+                canDelete = false;
+                reason = "Could not verify the connected Shopify store and exact product. Deletion blocked.";
+            }
+        }
+        return Ok(new { item = new {
+            partId = id, canDelete, reason,
+            item.LastModified, item.DaysSinceModified,
+            item.UnavailableSince, item.DaysUnavailable,
+            item.ShopifyLinked, item.HasHistory,
+            shopify,
+            minimumDeletionAgeDays = MinimumDeletionAgeDays
+        } });
     }
 
     [HttpDelete("{id:int}")]
@@ -194,26 +219,52 @@ WHERE p.id=@PartId;";
         if (_shippingSettings.AsyncShippingJobsSchemaReady && await _shippingJobs.HasOpenAsync(id))
             return Conflict(new { message = "A shipping update is still pending." });
 
-        // The stored procedure repeats every precondition under a SQL row lock.
-        // It archives the part/audit and queues photographs inside the same transaction.
-        try
+        if (check.ShopifyLinked)
         {
-            await using var connection = new SqlConnection(_connectionString);
-            await connection.OpenAsync();
-            await using var command = new SqlCommand("dbo.InventoryCleanup_Delete", connection)
+            // A Shopify product must never be unlinked solely to bypass the old SQL guard.
+            // The coordinator verifies the store and product, records the remote
+            // operation, and invokes SQL-atomic finalization after success.
+            try
             {
-                CommandType = CommandType.StoredProcedure,
-                CommandTimeout = 60
-            };
-            command.Parameters.Add("@PartId", SqlDbType.Int).Value = id;
-            command.Parameters.Add("@DeletedByUserId", SqlDbType.Int).Value = user.Id;
-            command.Parameters.Add("@MinimumAgeDays", SqlDbType.Int).Value = MinimumDeletionAgeDays;
-            await command.ExecuteNonQueryAsync();
-            _logger.LogWarning("Inventory cleanup: Admin {UserId} deleted PartId {PartId}", user.Id, id);
+                var outcome = await _shopifyCleanup.DeleteAsync(id, user.Id);
+                if (!outcome.Deleted)
+                    return Conflict(new { message = outcome.Message, retryable = true });
+                _logger.LogWarning("Coordinated Shopify cleanup completed: PartId {PartId}", id);
+            }
+            catch (SqlException ex) when (ex.Number >= 51001 && ex.Number <= 51199)
+            {
+                return Conflict(new { message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Coordinated Shopify deletion preflight failed for PartId {PartId}", id);
+                return StatusCode(502, new {
+                    message = "Unable to safely verify or complete Shopify deletion. No new attempt should be made without reviewing the operation status."
+                });
+            }
         }
-        catch (SqlException ex) when (ex.Number is >= 51001 and <= 51007)
+        else
         {
-            return Conflict(new { message = ex.Message });
+            // Existing non-Shopify cleanup remains unchanged.
+            try
+            {
+                await using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+                await using var command = new SqlCommand("dbo.InventoryCleanup_Delete", connection)
+                {
+                    CommandType = CommandType.StoredProcedure,
+                    CommandTimeout = 60
+                };
+                command.Parameters.Add("@PartId", SqlDbType.Int).Value = id;
+                command.Parameters.Add("@DeletedByUserId", SqlDbType.Int).Value = user.Id;
+                command.Parameters.Add("@MinimumAgeDays", SqlDbType.Int).Value = MinimumDeletionAgeDays;
+                await command.ExecuteNonQueryAsync();
+                _logger.LogWarning("Inventory cleanup: Admin {UserId} deleted PartId {PartId}", user.Id, id);
+            }
+            catch (SqlException ex) when (ex.Number is >= 51001 and <= 51007)
+            {
+                return Conflict(new { message = ex.Message });
+            }
         }
         // A separate queue retains file paths even if filesystem deletion fails.
         var cleanup = await PurgePhotosAsync(id);
