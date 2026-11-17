@@ -175,7 +175,8 @@ WHERE p.id=@PartId;";
               item.ShopifyLinked, item.HasHistory,
               minimumDeletionAgeDays = MinimumDeletionAgeDays } });
         return Ok(new { item = new { partId = id, item.CanDelete, item.Reason,
-          item.LastModified, item.DaysSinceModified, item.ShopifyLinked, item.HasHistory,
+          item.LastModified, item.DaysSinceModified, item.UnavailableSince, item.DaysUnavailable,
+          item.ShopifyLinked, item.HasHistory,
           minimumDeletionAgeDays = MinimumDeletionAgeDays } });
     }
 
