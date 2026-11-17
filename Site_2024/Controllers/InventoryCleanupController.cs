@@ -122,7 +122,8 @@ SELECT p.datemodified, a.status,
  CASE WHEN p.ShopifyProductId IS NOT NULL OR p.ShopifyVariantId IS NOT NULL
                 OR p.ShopifyInventoryItemId IS NOT NULL THEN CAST(1 AS bit)
       ELSE CAST(0 AS bit) END AS ShopifyLinked,
- CASE WHEN EXISTS(SELECT 1 FROM dbo.PartSales WHERE PartId=p.id)
+ CASE WHEN p.ShopifyOrderId IS NOT NULL OR p.SoldOnUtc IS NOT NULL
+        OR EXISTS(SELECT 1 FROM dbo.PartSales WHERE PartId=p.id)
         OR EXISTS(SELECT 1 FROM dbo.RefundRequests WHERE PartId=p.id)
         OR EXISTS(SELECT 1 FROM dbo.RefundRequestItems WHERE PartId=p.id)
         OR EXISTS(SELECT 1 FROM dbo.RefundFinalizationItems WHERE PartId=p.id)
