@@ -1696,42 +1696,14 @@ namespace Site_2024.Web.Api.Controllers
             return StatusCode(code, response);
         }
 
+        // Legacy delete is retired: it omitted age, history and photo checks.
+        // All deletion must go through /api/admin/inventory-cleanup/{id}.
         [HttpDelete("{id:int}")]
         [Authorize(Policy = "PartsDelete")]
-        public async Task<ActionResult<SuccessResponse>> Delete(int id)
+        public IActionResult Delete(int id)
         {
-            int code = 200;
-            BaseResponse response;
-
-            try
-            {
-                if (_shippingSettings.Value.AsyncShippingJobsSchemaReady &&
-                    await _shippingJobStore.HasOpenAsync(id))
-                    return Conflict(new ErrorResponse(
-                        "A shipping job is pending or needs attention. Deletion is blocked."));
-
-                // DEV safety: never remove only the local row for a Shopify-linked part.
-                Part? linkedPart = _service.GetPartById(id);
-                if (linkedPart == null)
-                    return NotFound(new ErrorResponse("Part not found."));
-                if (linkedPart.ShopifyProductId.HasValue ||
-                    linkedPart.ShopifyVariantId.HasValue ||
-                    linkedPart.ShopifyInventoryItemId.HasValue)
-                    return Conflict(new ErrorResponse(
-                        "This listing is linked to Shopify. Coordinated deletion " +
-                        "must remove the Shopify listing before the local part. " +
-                        "No changes were made."));
-                _service.DeletePart(id);
-                response = new SuccessResponse();
-            }
-            catch (Exception ex)
-            {
-                code = 500;
-                base.Logger.LogError(ex.ToString());
-                response = new ErrorResponse(ex.Message);
-            }
-
-            return StatusCode(code, response);
+            return StatusCode(410, new ErrorResponse(
+                "Direct part deletion is retired. Use Admin Actions > Inventory Cleanup."));
         }
 
         // Keep this as a debug endpoint if you still need it (Week 1: stability).
